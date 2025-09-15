@@ -1,2 +1,2 @@
-# Gestor-Moto-Repuestos
-Pagina para negocio de venta de repuesto de motos finalizada
+# Gestor-Moto-Rep
+Pagina para negocio de venta de repuesto de motos
