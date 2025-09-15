@@ -3,8 +3,8 @@ import { useRouter } from 'next/router';
 import { db } from '../../../lib/firebase';
 import { useAuth } from '../../../contexts/AuthContext';
 import Layout from '../../../components/Layout';
-import { collection, query, where, onSnapshot, doc, getDocs } from 'firebase/firestore';
-import { ArrowLeftIcon, ShoppingBagIcon, ChevronDownIcon, ChevronUpIcon, ChevronLeftIcon, ChevronRightIcon, CalendarIcon } from '@heroicons/react/24/outline';
+import { collection, query, where, onSnapshot, doc, getDocs, orderBy } from 'firebase/firestore';
+import { ArrowLeftIcon, ShoppingBagIcon, ChevronDownIcon, ChevronUpIcon, ChevronLeftIcon, ChevronRightIcon, CalendarIcon, ArrowTrendingDownIcon, ExclamationTriangleIcon, MinusCircleIcon } from '@heroicons/react/24/outline';
 
 const ComprasPage = () => {
   const router = useRouter();
@@ -12,7 +12,9 @@ const ComprasPage = () => {
   const { user } = useAuth();
   const [cliente, setCliente] = useState(null);
   const [ventas, setVentas] = useState([]);
+  const [devoluciones, setDevoluciones] = useState([]); // NUEVO: Estado para devoluciones
   const [ventasFiltradas, setVentasFiltradas] = useState([]);
+  const [devolucionesFiltradas, setDevolucionesFiltradas] = useState([]); // NUEVO
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   
@@ -21,6 +23,8 @@ const ComprasPage = () => {
   const [startDate, setStartDate] = useState(null);
   const [endDate, setEndDate] = useState(null);
   const [totalPeriodo, setTotalPeriodo] = useState(0);
+  const [totalDevoluciones, setTotalDevoluciones] = useState(0); // NUEVO
+  const [totalReal, setTotalReal] = useState(0); // NUEVO: Total real (ventas - devoluciones)
   
   // Estado para controlar qué venta está expandida para ver los detalles de los productos
   const [expandedVentaId, setExpandedVentaId] = useState(null);
@@ -74,37 +78,83 @@ const ComprasPage = () => {
     }
   };
 
-  // Función para filtrar ventas por período
+  // FUNCIÓN ACTUALIZADA: Filtrar ventas y devoluciones por período
   const filterVentasByPeriod = () => {
     if (filterPeriod === 'all') {
       setVentasFiltradas(ventas);
-      setTotalPeriodo(ventas.reduce((sum, venta) => sum + parseFloat(venta.totalVenta || 0), 0));
+      setDevolucionesFiltradas(devoluciones);
+      
+      const totalVentas = ventas.reduce((sum, venta) => sum + parseFloat(venta.totalVenta || 0), 0);
+      const totalDevs = devoluciones.reduce((sum, dev) => sum + parseFloat(dev.montoADevolver || 0), 0);
+      
+      setTotalPeriodo(totalVentas);
+      setTotalDevoluciones(totalDevs);
+      setTotalReal(totalVentas - totalDevs);
       return;
     }
 
     const dateRange = getDateRange(filterPeriod);
     if (!dateRange) {
       setVentasFiltradas(ventas);
-      setTotalPeriodo(ventas.reduce((sum, venta) => sum + parseFloat(venta.totalVenta || 0), 0));
+      setDevolucionesFiltradas(devoluciones);
+      
+      const totalVentas = ventas.reduce((sum, venta) => sum + parseFloat(venta.totalVenta || 0), 0);
+      const totalDevs = devoluciones.reduce((sum, dev) => sum + parseFloat(dev.montoADevolver || 0), 0);
+      
+      setTotalPeriodo(totalVentas);
+      setTotalDevoluciones(totalDevs);
+      setTotalReal(totalVentas - totalDevs);
       return;
     }
 
-    const filtered = ventas.filter(venta => {
+    // Filtrar ventas
+    const filteredVentas = ventas.filter(venta => {
       if (!venta.fechaVenta) return false;
       const fechaVenta = venta.fechaVenta;
       return fechaVenta >= dateRange.start && fechaVenta <= dateRange.end;
     });
 
-    setVentasFiltradas(filtered);
-    setTotalPeriodo(filtered.reduce((sum, venta) => sum + parseFloat(venta.totalVenta || 0), 0));
+    // Filtrar devoluciones
+    const filteredDevoluciones = devoluciones.filter(devolucion => {
+      if (!devolucion.fechaProcesamiento) return false;
+      const fechaDevolucion = devolucion.fechaProcesamiento;
+      return fechaDevolucion >= dateRange.start && fechaDevolucion <= dateRange.end;
+    });
+
+    setVentasFiltradas(filteredVentas);
+    setDevolucionesFiltradas(filteredDevoluciones);
+    
+    const totalVentas = filteredVentas.reduce((sum, venta) => sum + parseFloat(venta.totalVenta || 0), 0);
+    const totalDevs = filteredDevoluciones.reduce((sum, dev) => sum + parseFloat(dev.montoADevolver || 0), 0);
+    
+    setTotalPeriodo(totalVentas);
+    setTotalDevoluciones(totalDevs);
+    setTotalReal(totalVentas - totalDevs);
   };
 
-  // Aplicar filtros cuando cambien las ventas o el período
+  // FUNCIÓN NUEVA: Obtener devoluciones de una venta específica
+  const getDevolucionesDeVenta = (numeroVenta) => {
+    return devolucionesFiltradas.filter(dev => dev.numeroVenta === numeroVenta && dev.estado === 'aprobada');
+  };
+
+  // FUNCIÓN NUEVA: Calcular total real de una venta (después de devoluciones)
+  const getTotalRealVenta = (venta) => {
+    const devolucionesVenta = getDevolucionesDeVenta(venta.numeroVenta);
+    const totalDevoluciones = devolucionesVenta.reduce((sum, dev) => sum + parseFloat(dev.montoADevolver || 0), 0);
+    return parseFloat(venta.totalVenta || 0) - totalDevoluciones;
+  };
+
+  // FUNCIÓN NUEVA: Verificar si una venta tiene devoluciones
+  const ventaTieneDevoluciones = (numeroVenta) => {
+    return getDevolucionesDeVenta(numeroVenta).length > 0;
+  };
+
+  // Aplicar filtros cuando cambien las ventas, devoluciones o el período
   useEffect(() => {
     filterVentasByPeriod();
-    setCurrentPage(1); // Resetear a la primera página cuando cambien los filtros
-    setExpandedVentaId(null); // Colapsar cualquier venta expandida
-  }, [ventas, filterPeriod, startDate, endDate]);
+    setCurrentPage(1);
+    setExpandedVentaId(null);
+  }, [ventas, devoluciones, filterPeriod, startDate, endDate]);
 
   // Manejador para cambio de período
   const handleFilterChange = (period) => {
@@ -140,7 +190,7 @@ const ComprasPage = () => {
     setExpandedVentaId(expandedVentaId === ventaId ? null : ventaId);
   };
 
-  // Cargar datos del cliente y sus ventas
+  // EFECTO ACTUALIZADO: Cargar datos del cliente, ventas Y devoluciones
   useEffect(() => {
     if (!id || !user) {
       return;
@@ -148,10 +198,10 @@ const ComprasPage = () => {
 
     setLoading(true);
     setError(null);
-    setExpandedVentaId(null); // Resetear el estado de expansión al cambiar de cliente
-    setCurrentPage(1); // Resetear la página al cambiar de cliente
+    setExpandedVentaId(null);
+    setCurrentPage(1);
 
-    // Listener para los datos del cliente, usando el ID del router
+    // Listener para los datos del cliente
     const clienteRef = doc(db, 'cliente', id);
     const unsubscribeCliente = onSnapshot(clienteRef, (docSnap) => {
       if (docSnap.exists()) {
@@ -169,7 +219,6 @@ const ComprasPage = () => {
     // Listener para las ventas del cliente
     const qVentas = query(collection(db, 'ventas'), where('clienteId', '==', id));
     const unsubscribeVentas = onSnapshot(qVentas, async (querySnapshot) => {
-      // Usamos Promise.all para esperar que todas las subcolecciones de itemsVenta se carguen
       const ventasWithItemsPromises = querySnapshot.docs.map(async (docVenta) => {
         const ventaData = {
           id: docVenta.id,
@@ -177,34 +226,60 @@ const ComprasPage = () => {
           fechaVenta: docVenta.data().fechaVenta?.toDate() || null,
         };
 
-        // Fetch de la subcolección 'itemsVenta' para cada venta
         const itemsVentaSnapshot = await getDocs(collection(docVenta.ref, 'itemsVenta'));
         const items = itemsVentaSnapshot.docs.map(docItem => ({
           id: docItem.id,
           ...docItem.data()
         }));
 
-        // Retornamos el objeto de venta con los items cargados
         return { ...ventaData, items };
       });
 
       const ventasList = await Promise.all(ventasWithItemsPromises);
-
       ventasList.sort((a, b) => b.fechaVenta - a.fechaVenta);
       
       setVentas(ventasList);
-      setLoading(false);
+      
+      // Solo marcar loading como false cuando ambas consultas estén completas
+      if (ventasList.length > 0) {
+        // Las devoluciones se cargan por separado
+      } else {
+        setLoading(false);
+      }
     }, (err) => {
       console.error("Error al escuchar las ventas:", err);
-      setError("Error al cargar las ventas del cliente. Es posible que falte un índice en Firestore. " + err.message);
+      setError("Error al cargar las ventas del cliente. " + err.message);
       setVentas([]);
       setLoading(false);
     });
 
-    // Función de limpieza para desuscribirse de los listeners
+    // NUEVO: Listener para las devoluciones del cliente
+    const unsubscribeDevoluciones = onSnapshot(
+      query(collection(db, 'devoluciones'), where('clienteId', '==', id)),
+      (querySnapshot) => {
+        const devolucionesList = querySnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data(),
+          fechaProcesamiento: doc.data().fechaProcesamiento?.toDate() || null,
+        }));
+
+        devolucionesList.sort((a, b) => (b.fechaProcesamiento || new Date(0)) - (a.fechaProcesamiento || new Date(0)));
+        
+        setDevoluciones(devolucionesList);
+        setLoading(false);
+      },
+      (err) => {
+        console.error("Error al escuchar las devoluciones:", err);
+        // No marcar como error crítico, las devoluciones son opcionales
+        setDevoluciones([]);
+        setLoading(false);
+      }
+    );
+
     return () => {
       unsubscribeCliente();
       unsubscribeVentas();
+      unsubscribeDevoluciones(); // NUEVO
     };
 
   }, [id, user]);
@@ -225,7 +300,7 @@ const ComprasPage = () => {
   const goToPage = (page) => {
     if (page >= 1 && page <= totalPages) {
       setCurrentPage(page);
-      setExpandedVentaId(null); // Colapsar cualquier venta expandida al cambiar página
+      setExpandedVentaId(null);
     }
   };
 
@@ -239,6 +314,14 @@ const ComprasPage = () => {
     if (currentPage < totalPages) {
       goToPage(currentPage + 1);
     }
+  };
+
+  // FUNCIÓN NUEVA: Formatear moneda
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat('es-PE', {
+      style: 'currency',
+      currency: 'PEN'
+    }).format(amount || 0);
   };
 
   if (!user) {
@@ -378,22 +461,32 @@ const ComprasPage = () => {
                   </select>
                 </div>
 
-                {/* Resumen del período */}
+                {/* RESUMEN ACTUALIZADO del período con devoluciones */}
                 {totalVentas > 0 && (
                   <div className="mt-3 pt-3 border-t border-gray-200">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between flex-wrap gap-4">
                       <p className="text-sm text-gray-600">
                         Mostrando <span className="font-medium">{totalVentas}</span> compras {getPeriodText()}
+                        {devolucionesFiltradas.length > 0 && (
+                          <span className="text-orange-600 ml-2">
+                            • <span className="font-medium">{devolucionesFiltradas.length}</span> devoluciones
+                          </span>
+                        )}
                       </p>
-                      <div className="bg-green-100 px-3 py-1 rounded-full">
-                        <p className="text-sm font-bold text-green-800">
-                          Total {getPeriodText()}: <span className="text-lg">S/. {totalPeriodo.toFixed(2)}</span>
-                        </p>
+                      <div className="flex items-center space-x-4">
+
+                        {/* Total real */}
+                        <div className="bg-green-100 px-3 py-1 rounded-full">
+                          <p className="text-sm font-bold text-green-800">
+                            Total real {getPeriodText()}: <span className="text-lg">{formatCurrency(totalReal)}</span>
+                          </p>
+                        </div>
                       </div>
                     </div>
                   </div>
                 )}
               </div>
+                
 
               {ventasFiltradas.length === 0 ? (
                 <p className="p-4 text-center text-gray-500">
@@ -404,104 +497,221 @@ const ComprasPage = () => {
                 </p>
               ) : (
                 <>
-
                   <div className="overflow-x-auto shadow ring-1 ring-black ring-opacity-5 md:rounded-lg overflow-y-auto">
                     <table className="min-w-full border-collapse">
                       <thead className="bg-gray-50 sticky top-0 z-10">
                         <tr>
                           <th scope="col" className="border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 text-center"></th>
                           <th scope="col" className="border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 text-center">FECHA DE VENTA</th>
-                          <th scope="col" className="border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 text-center">TOTAL</th>
+                          <th scope="col" className="border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 text-center">TOTAL ORIGINAL</th>
+                          <th scope="col" className="border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 text-center">DEVUELTO</th>
+                          <th scope="col" className="border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 text-center">TOTAL REAL</th>
                           <th scope="col" className="border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 text-center">MÉTODO DE PAGO</th>
+                          <th scope="col" className="border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 text-center">ESTADO</th>
                         </tr>
                       </thead>
                       <tbody className="bg-white">
-                        {ventasPaginadas.map((venta, index) => (
-                          <>
-                            <tr 
-                              key={venta.id} 
-                              className={`
-                                ${expandedVentaId === venta.id 
-                                  ? 'bg-blue-50 border-2 border-blue-200' 
-                                  : index % 2 === 0 ? 'bg-white' : 'bg-gray-50'
-                                } 
-                                hover:bg-gray-100 transition-colors
-                              `}
-                            >
-                              {/* Celda para el botón de expansión */}
-                              <td className="border border-gray-300 w-10 px-1 py-2 text-sm text-black text-center">
-                                {venta.items?.length > 0 && (
-                                  <button 
-                                    onClick={() => handleToggleExpand(venta.id)} 
-                                    className={`focus:outline-none p-1 rounded ${expandedVentaId === venta.id ? 'bg-blue-200' : ''}`}
-                                  >
-                                    {expandedVentaId === venta.id ? (
-                                      <ChevronUpIcon className="h-5 w-5 text-blue-600" />
-                                    ) : (
-                                      <ChevronDownIcon className="h-5 w-5 text-gray-500" />
-                                    )}
-                                  </button>
-                                )}
-                              </td>
-                              <td className={`border border-gray-300 whitespace-nowrap px-3 py-2 text-sm text-black text-center ${expandedVentaId === venta.id ? 'font-bold' : ''}`}>
-                                {venta.fechaVenta ? venta.fechaVenta.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) : 'N/A'}
-                              </td>
-                              <td className={`border border-gray-300 whitespace-nowrap px-3 py-2 text-sm text-black text-center font-bold ${expandedVentaId === venta.id ? 'text-blue-700' : ''}`}>
-                                S/. {parseFloat(venta.totalVenta || 0).toFixed(2)}
-                              </td>
-                              <td className={`border border-gray-300 whitespace-nowrap px-3 py-2 text-sm text-black text-center ${expandedVentaId === venta.id ? 'font-semibold' : ''}`}>
-                                {venta.metodoPago || 'N/A'}
-                              </td>
-                            </tr>
-                            {/* Fila expandible para mostrar los detalles de la compra */}
-                            {expandedVentaId === venta.id && venta.items && (
-                              <tr>
-                                <td colSpan="4" className="border-0 p-0">
-                                  {/* Contenedor con fondo distintivo y borde */}
-                                  <div className="bg-gradient-to-r from-blue-100 via-blue-50 to-blue-100 border-l-4 border-blue-400 mx-2 mb-2 rounded-lg shadow-inner">
-                                    <div className="p-4">
-                                      {/* Header con información de la venta seleccionada */}
-                                      <div className="flex items-center justify-between mb-3 pb-2 border-b border-blue-200">
-                                        <h4 className="text-sm font-bold text-blue-800">
-                                          Productos comprados el {venta.fechaVenta ? venta.fechaVenta.toLocaleDateString('es-ES', { 
-                                            weekday: 'long',
-                                            day: '2-digit', 
-                                            month: 'long', 
-                                            year: 'numeric' 
-                                          }) : 'N/A'}
-                                        </h4>
-                                      </div>
-                                      
-                                      {/* Tabla de productos con fondo distintivo */}
-                                      <div className="overflow-x-auto rounded-lg">
-                                        <table className="min-w-full border-collapse bg-white shadow-sm rounded-lg overflow-hidden">
-                                          <thead className="bg-blue-200">
-                                            <tr>
-                                              <th scope="col" className="border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-800 text-left">Producto</th>
-                                              <th scope="col" className="border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-800 text-center">Cantidad</th>
-                                              <th scope="col" className="border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-800 text-center">Precio Unitario</th>
-                                              <th scope="col" className="border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-800 text-center">Subtotal</th>
-                                            </tr>
-                                          </thead>
-                                          <tbody>
-                                            {venta.items.map((item, itemIndex) => (
-                                              <tr key={itemIndex} className={itemIndex % 2 === 0 ? 'bg-white' : 'bg-blue-25'}>
-                                                <td className="border border-blue-200 px-3 py-2 text-sm text-gray-800 font-medium">{item.nombreProducto}</td>
-                                                <td className="border border-blue-200 px-3 py-2 text-sm text-gray-700 text-center">{item.cantidad}</td>
-                                                <td className="border border-blue-200 px-3 py-2 text-sm text-gray-700 text-center">S/. {parseFloat(item.precioVentaUnitario || 0).toFixed(2)}</td>
-                                                <td className="border border-blue-200 px-3 py-2 text-sm text-gray-800 text-center font-semibold">S/. {(parseFloat(item.cantidad) * parseFloat(item.precioVentaUnitario)).toFixed(2)}</td>
-                                              </tr>
-                                            ))}
-                                          </tbody>
-                                        </table>
-                                      </div>
+                        {ventasPaginadas.map((venta, index) => {
+                          const devolucionesVenta = getDevolucionesDeVenta(venta.numeroVenta);
+                          const totalDevolucionesVenta = devolucionesVenta.reduce((sum, dev) => sum + parseFloat(dev.montoADevolver || 0), 0);
+                          const totalRealVenta = getTotalRealVenta(venta);
+                          const tieneDevolucion = ventaTieneDevoluciones(venta.numeroVenta);
+                          
+                          return (
+                            <>
+                              <tr 
+                                key={venta.id} 
+                                className={`
+                                  ${expandedVentaId === venta.id 
+                                    ? 'bg-blue-50 border-2 border-blue-200' 
+                                    : index % 2 === 0 ? 'bg-white' : 'bg-gray-50'
+                                  } 
+                                  ${tieneDevolucion ? 'border-l-4 border-l-red-400' : ''}
+                                  hover:bg-gray-100 transition-colors
+                                `}
+                              >
+                                {/* Celda para el botón de expansión */}
+                                <td className="border border-gray-300 w-10 px-1 py-2 text-sm text-black text-center">
+                                  {venta.items?.length > 0 && (
+                                    <button 
+                                      onClick={() => handleToggleExpand(venta.id)} 
+                                      className={`focus:outline-none p-1 rounded ${expandedVentaId === venta.id ? 'bg-blue-200' : ''}`}
+                                    >
+                                      {expandedVentaId === venta.id ? (
+                                        <ChevronUpIcon className="h-5 w-5 text-blue-600" />
+                                      ) : (
+                                        <ChevronDownIcon className="h-5 w-5 text-gray-500" />
+                                      )}
+                                    </button>
+                                  )}
+                                </td>
+                                
+                                {/* Fecha de venta */}
+                                <td className={`border border-gray-300 whitespace-nowrap px-3 py-2 text-sm text-black text-center ${expandedVentaId === venta.id ? 'font-bold' : ''}`}>
+                                  {venta.fechaVenta ? venta.fechaVenta.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) : 'N/A'}
+                                </td>
+                                
+                                {/* Total original */}
+                                <td className={`border border-gray-300 whitespace-nowrap px-3 py-2 text-sm text-black text-center font-bold ${tieneDevolucion ? 'line-through text-gray-500' : ''}`}>
+                                  {formatCurrency(venta.totalVenta)}
+                                </td>
+                                
+                                {/* Monto devuelto */}
+                                <td className="border border-gray-300 whitespace-nowrap px-3 py-2 text-sm text-center">
+                                  {tieneDevolucion ? (
+                                    <span className="text-red-600 font-bold">
+                                      -{formatCurrency(totalDevolucionesVenta)}
+                                    </span>
+                                  ) : (
+                                    <span className="text-gray-400">-</span>
+                                  )}
+                                </td>
+                                
+                                {/* Total real */}
+                                <td className={`border border-gray-300 whitespace-nowrap px-3 py-2 text-sm text-center font-bold ${
+                                  tieneDevolucion ? 'text-green-600' : 'text-black'
+                                }`}>
+                                  {formatCurrency(totalRealVenta)}
+                                </td>
+                                
+                                {/* Método de pago */}
+                                <td className={`border border-gray-300 whitespace-nowrap px-3 py-2 text-sm text-black text-center ${expandedVentaId === venta.id ? 'font-semibold' : ''}`}>
+                                  {venta.metodoPago || 'N/A'}
+                                </td>
+                                
+                                {/* Estado */}
+                                <td className="border border-gray-300 px-3 py-2 text-center">
+                                  {tieneDevolucion ? (
+                                    <div className="flex flex-col items-center space-y-1">
+                                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+                                        CON DEVOLUCIÓN
+                                      </span>
+                                      {devolucionesVenta.map((dev, idx) => (
+                                        <span key={idx} className="inline-flex items-center px-1 py-0.5 rounded text-xs bg-red-100 text-red-700">
+                                          {formatCurrency(dev.montoADevolver)}
+                                        </span>
+                                      ))}
                                     </div>
-                                  </div>
+                                  ) : (
+                                    <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                      COMPLETA
+                                    </span>
+                                  )}
                                 </td>
                               </tr>
-                            )}
-                          </>
-                        ))}
+                              
+                              {/* Fila expandible para mostrar los detalles de la compra */}
+                              {expandedVentaId === venta.id && venta.items && (
+                                <tr>
+                                  <td colSpan="7" className="border-0 p-0">
+                                    <div className="bg-gradient-to-r from-blue-100 via-blue-50 to-blue-100 border-l-4 border-blue-400 mx-2 mb-2 rounded-lg shadow-inner">
+                                      <div className="p-4">
+                                        {/* Header con información de la venta seleccionada */}
+                                        <div className="flex items-center justify-between mb-3 pb-2 border-b border-blue-200">
+                                          <h4 className="text-sm font-bold text-blue-800">
+                                            Productos comprados el {venta.fechaVenta ? venta.fechaVenta.toLocaleDateString('es-ES', { 
+                                              weekday: 'long',
+                                              day: '2-digit', 
+                                              month: 'long', 
+                                              year: 'numeric' 
+                                            }) : 'N/A'}
+                                          </h4>
+                                          
+                                          {/* Mostrar información de devoluciones en el detalle */}
+                                          {tieneDevolucion && (
+                                            <div className="bg-red-100 px-3 py-1 rounded-full border border-red-300">
+                                              <p className="text-xs font-bold text-red-800">
+                                                Devuelto: {formatCurrency(totalDevolucionesVenta)}
+                                              </p>
+                                            </div>
+                                          )}
+                                        </div>
+                                        
+                                        {/* Información adicional de devoluciones */}
+                                        {tieneDevolucion && (
+                                          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+                                            <h5 className="text-xs font-bold text-red-800 mb-2 flex items-center">
+                                              <ExclamationTriangleIcon className="h-4 w-4 mr-1" />
+                                              Devoluciones Aplicadas ({devolucionesVenta.length})
+                                            </h5>
+                                            <div className="space-y-1">
+                                              {devolucionesVenta.map((devolucion, devIdx) => (
+                                                <div key={devIdx} className="flex items-center justify-between text-xs">
+                                                  <span className="text-red-700">
+                                                    {devolucion.fechaProcesamiento?.toLocaleDateString('es-PE')} - {devolucion.metodoPagoOriginal?.toUpperCase()}
+                                                  </span>
+                                                  <span className="font-bold text-red-800">
+                                                    -{formatCurrency(devolucion.montoADevolver)}
+                                                  </span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+                                        
+                                        {/* Tabla de productos */}
+                                        <div className="overflow-x-auto rounded-lg">
+                                          <table className="min-w-full border-collapse bg-white shadow-sm rounded-lg overflow-hidden">
+                                            <thead className="bg-blue-200">
+                                              <tr>
+                                                <th scope="col" className="border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-800 text-left">Producto</th>
+                                                <th scope="col" className="border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-800 text-center">Cantidad</th>
+                                                <th scope="col" className="border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-800 text-center">Precio Unitario</th>
+                                                <th scope="col" className="border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-800 text-center">Subtotal</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {venta.items.map((item, itemIndex) => (
+                                                <tr key={itemIndex} className={itemIndex % 2 === 0 ? 'bg-white' : 'bg-blue-25'}>
+                                                  <td className="border border-blue-200 px-3 py-2 text-sm text-gray-800 font-medium">{item.nombreProducto}</td>
+                                                  <td className="border border-blue-200 px-3 py-2 text-sm text-gray-700 text-center">{item.cantidad}</td>
+                                                  <td className="border border-blue-200 px-3 py-2 text-sm text-gray-700 text-center">{formatCurrency(item.precioVentaUnitario || 0)}</td>
+                                                  <td className="border border-blue-200 px-3 py-2 text-sm text-gray-800 text-center font-semibold">{formatCurrency((parseFloat(item.cantidad) * parseFloat(item.precioVentaUnitario)))}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                            
+                                            {/* Footer con totales */}
+                                            <tfoot className="bg-blue-100">
+                                              <tr>
+                                                <td colSpan="3" className="border border-blue-300 px-3 py-2 text-sm font-bold text-blue-800 text-right">
+                                                  Total Original:
+                                                </td>
+                                                <td className="border border-blue-300 px-3 py-2 text-sm font-bold text-blue-800 text-center">
+                                                  {formatCurrency(venta.totalVenta)}
+                                                </td>
+                                              </tr>
+                                              {tieneDevolucion && (
+                                                <>
+                                                  <tr>
+                                                    <td colSpan="3" className="border border-blue-300 px-3 py-2 text-sm font-bold text-red-700 text-right">
+                                                      Total Devuelto:
+                                                    </td>
+                                                    <td className="border border-blue-300 px-3 py-2 text-sm font-bold text-red-700 text-center">
+                                                      -{formatCurrency(totalDevolucionesVenta)}
+                                                    </td>
+                                                  </tr>
+                                                  <tr>
+                                                    <td colSpan="3" className="border border-blue-300 px-3 py-2 text-sm font-bold text-green-700 text-right">
+                                                      Total Real:
+                                                    </td>
+                                                    <td className="border border-blue-300 px-3 py-2 text-sm font-bold text-green-700 text-center">
+                                                      {formatCurrency(totalRealVenta)}
+                                                    </td>
+                                                  </tr>
+                                                </>
+                                              )}
+                                            </tfoot>
+                                          </table>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -581,4 +791,5 @@ const ComprasPage = () => {
     </Layout>
   );
 }
+
 export default ComprasPage;

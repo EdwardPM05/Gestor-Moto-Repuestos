@@ -1,51 +1,57 @@
-//pages/cotizaciones/[id].js
+// pages/cotizaciones/[id].js
+
 import { useState, useEffect, Fragment } from 'react';
-import { useRouter } from 'next/router';
+import React from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import Layout from '../../components/Layout';
+import MixedPaymentModal from '../../components/modals/MixedPaymentModal';
 import { db } from '../../lib/firebase';
 import {
   collection,
-  getDoc,
-  doc,
-  addDoc,
-  updateDoc,
-  deleteDoc,
-  serverTimestamp,
+  getDocs,
   query,
   orderBy,
-  getDocs,
+  deleteDoc,
+  doc,
+  addDoc,
+  serverTimestamp,
   runTransaction,
-  onSnapshot,
   where,
+  updateDoc,
+  onSnapshot,
+  limit,
+  getDoc
 } from 'firebase/firestore';
 import {
-  DocumentTextIcon,
   PlusIcon,
-  MagnifyingGlassIcon,
   TrashIcon,
-  ArrowLeftIcon,
-  CheckCircleIcon,
-  XCircleIcon,
+  MagnifyingGlassIcon,
+  XMarkIcon,
+  ShoppingCartIcon,
   UserIcon,
   TruckIcon,
   CreditCardIcon,
+  DocumentTextIcon,
+  CheckIcon,
   PencilIcon,
-  XMarkIcon,
-  ShoppingCartIcon,
+  ArrowLeftIcon,
+  EyeIcon,
+  ExclamationTriangleIcon,
+  PrinterIcon
 } from '@heroicons/react/24/outline';
+import { useRouter } from 'next/router';
 import { Dialog, Transition } from '@headlessui/react';
 import Select from 'react-select';
+import { generarPDFCotizacionCompleta } from '../../components/utils/pdfGeneratorCotizaciones';
 
-const CotizacionEditPage = () => {
+const EditarVerCotizacionPage = () => {
   const router = useRouter();
-  const { id } = router.query;
+  const { id: cotizacionId } = router.query;
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
-  const [loadingData, setLoadingData] = useState(true);
   const [error, setError] = useState(null);
 
-  // Estados para productos
+  // Estados para productos - SIN CARGAR AUTOMÁTICAMENTE
   const [productos, setProductos] = useState([]);
   const [filteredProductos, setFilteredProductos] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -55,28 +61,48 @@ const CotizacionEditPage = () => {
   const [clientes, setClientes] = useState([]);
   const [empleados, setEmpleados] = useState([]);
 
-  // Estados para la cotización
-  const [cotizacionData, setCotizacionData] = useState(null);
+  // Estados para la cotización actual
+  const [cotizacion, setCotizacion] = useState(null);
   const [itemsCotizacion, setItemsCotizacion] = useState([]);
 
-  // Estados para el formulario
+  // Estados para el formulario de cotización
   const [selectedCliente, setSelectedCliente] = useState(null);
   const [selectedEmpleado, setSelectedEmpleado] = useState(null);
   const [placaMoto, setPlacaMoto] = useState('');
   const [metodoPago, setMetodoPago] = useState('');
   const [observaciones, setObservaciones] = useState('');
-  const [numeroCotizacion, setNumeroCotizacion] = useState('');
 
-  // Estados para modales
+  // Estados para modal de cantidad
   const [showQuantityModal, setShowQuantityModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [quantity, setQuantity] = useState(1);
   const [precioVenta, setPrecioVenta] = useState(0);
 
+  // Estados para modal de edición de item
   const [showEditItemModal, setShowEditItemModal] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
   const [editQuantity, setEditQuantity] = useState(1);
   const [editPrecio, setEditPrecio] = useState(0);
+
+  // Estados para pagos mixtos
+  const [paymentData, setPaymentData] = useState({
+    totalAmount: 0,
+    paymentMethods: [
+      {
+        method: 'efectivo',
+        amount: 0,
+        label: 'EFECTIVO',
+        icon: '💵'
+      }
+    ],
+    isMixedPayment: false
+  });
+
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+
+  // Determinar si es modo edición o solo vista
+  const isViewOnly = cotizacion?.estado === 'confirmada' || cotizacion?.estado === 'cancelada';
+  const canEdit = !isViewOnly && (cotizacion?.estado === 'pendiente' || cotizacion?.estado === 'borrador');
 
   // Cargar datos iniciales
   useEffect(() => {
@@ -84,15 +110,14 @@ const CotizacionEditPage = () => {
       router.push('/auth');
       return;
     }
-    if (!id || id === 'nueva') {
-      router.push('/cotizaciones');
-      return;
+    if (cotizacionId) {
+      fetchInitialData();
+      fetchCotizacion();
     }
-    fetchInitialData();
-  }, [user, router, id]);
+  }, [user, router, cotizacionId]);
 
   const fetchInitialData = async () => {
-    setLoadingData(true);
+    setLoading(true);
     setError(null);
     try {
       // Cargar clientes
@@ -113,74 +138,119 @@ const CotizacionEditPage = () => {
       }));
       setEmpleados(empleadosList);
 
-      // Cargar cotización específica
-      const cotizacionRef = doc(db, 'cotizaciones', id);
-      const cotizacionDoc = await getDoc(cotizacionRef);
+    } catch (err) {
+      console.error("Error al cargar datos iniciales:", err);
+      setError("Error al cargar datos iniciales");
+    } finally {
+      setLoading(false);
+    }
+  };
 
-      if (!cotizacionDoc.exists()) {
-        setError('Cotización no encontrada.');
-        setLoadingData(false);
+  const fetchCotizacion = async () => {
+    if (!cotizacionId) return;
+
+    setLoading(true);
+    try {
+      const cotizacionRef = doc(db, 'cotizaciones', cotizacionId);
+      const cotizacionSnap = await getDoc(cotizacionRef);
+
+      if (!cotizacionSnap.exists()) {
+        setError('Cotización no encontrada');
         return;
       }
 
-      const cotizacion = { id: cotizacionDoc.id, ...cotizacionDoc.data() };
-      setCotizacionData(cotizacion);
+      const cotizacionData = { id: cotizacionSnap.id, ...cotizacionSnap.data() };
+      setCotizacion(cotizacionData);
 
-      // Cargar items de la cotización
+      // Cargar items
       const qItems = query(
-        collection(db, 'cotizaciones', id, 'itemsCotizacion'),
+        collection(db, 'cotizaciones', cotizacionId, 'itemsCotizacion'), 
         orderBy('createdAt', 'asc')
       );
       const itemsSnapshot = await getDocs(qItems);
-      const itemsList = itemsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
+      const itemsList = itemsSnapshot.docs.map(itemDoc => ({
+        id: itemDoc.id,
+        ...itemDoc.data()
       }));
       setItemsCotizacion(itemsList);
 
-      // Sincronizar formulario
-      syncFormWithCotizacion(cotizacion, clientesList, empleadosList);
-
     } catch (err) {
-      console.error("Error al cargar datos:", err);
-      setError("Error al cargar datos iniciales");
+      console.error("Error al cargar cotización:", err);
+      setError("Error al cargar cotización");
     } finally {
-      setLoadingData(false);
+      setLoading(false);
     }
   };
 
-  const syncFormWithCotizacion = (cotizacion, clientesList, empleadosList) => {
-    setNumeroCotizacion(cotizacion.numeroCotizacion || '');
-    setPlacaMoto(cotizacion.placaMoto || '');
-    setMetodoPago(cotizacion.metodoPago || '');
-    setObservaciones(cotizacion.observaciones || '');
+  // Escuchar cambios en tiempo real solo si es modo edición
+  useEffect(() => {
+    if (!cotizacionId || isViewOnly) return;
 
-    // Sincronizar cliente
-    if (cotizacion.clienteId) {
-      const cliente = clientesList.find(c => c.id === cotizacion.clienteId);
-      if (cliente) {
-        setSelectedCliente({
-          value: cliente.id,
-          label: `${cliente.nombre} ${cliente.apellido || ''} - ${cliente.dni || ''}`.trim()
-        });
+    const unsubscribe = onSnapshot(doc(db, 'cotizaciones', cotizacionId), async (docSnap) => {
+      if (docSnap.exists()) {
+        const cotizacionData = { id: docSnap.id, ...docSnap.data() };
+        setCotizacion(cotizacionData);
+
+        // Cargar items
+        const qItems = query(
+          collection(db, 'cotizaciones', cotizacionId, 'itemsCotizacion'), 
+          orderBy('createdAt', 'asc')
+        );
+        const itemsSnapshot = await getDocs(qItems);
+        const itemsList = itemsSnapshot.docs.map(itemDoc => ({
+          id: itemDoc.id,
+          ...itemDoc.data()
+        }));
+        setItemsCotizacion(itemsList);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [cotizacionId, isViewOnly]);
+
+  // Sincronizar formulario con cotización
+  useEffect(() => {
+    if (cotizacion && clientes.length > 0 && empleados.length > 0) {
+      // Sincronizar cliente
+      const cliente = clientes.find(c => c.id === cotizacion.clienteId);
+      setSelectedCliente(cliente ? {
+        value: cliente.id,
+        label: `${cliente.nombre} ${cliente.apellido || ''} - ${cliente.dni || ''}`.trim()
+      } : null);
+
+      // Sincronizar empleado
+      const empleado = empleados.find(e => e.id === cotizacion.empleadoAsignadoId);
+      setSelectedEmpleado(empleado ? {
+        value: empleado.id,
+        label: `${empleado.nombre} ${empleado.apellido || ''} - ${empleado.puesto || ''}`.trim()
+      } : null);
+
+      setPlacaMoto(cotizacion.placaMoto || '');
+      setMetodoPago(cotizacion.metodoPago || '');
+      setObservaciones(cotizacion.observaciones || '');
+
+      // Sincronizar datos de pago
+      if (cotizacion.paymentData) {
+        setPaymentData(cotizacion.paymentData);
       }
     }
+  }, [cotizacion, clientes, empleados]);
 
-    // Sincronizar empleado
-    if (cotizacion.empleadoAsignadoId) {
-      const empleado = empleadosList.find(e => e.id === cotizacion.empleadoAsignadoId);
-      if (empleado) {
-        setSelectedEmpleado({
-          value: empleado.id,
-          label: `${empleado.nombre} ${empleado.apellido || ''} - ${empleado.puesto || ''}`.trim()
-        });
-      }
-    }
-  };
+  // Actualizar el total cuando cambian los items
+  useEffect(() => {
+    const total = parseFloat(cotizacion?.totalCotizacion || 0);
+    setPaymentData(prev => ({
+      ...prev,
+      totalAmount: total,
+      paymentMethods: prev.isMixedPayment 
+        ? prev.paymentMethods 
+        : [{ ...prev.paymentMethods[0], amount: total }]
+    }));
+  }, [cotizacion?.totalCotizacion]);
 
-  // Búsqueda de productos con debounce
+  // BÚSQUEDA DE PRODUCTOS - solo si puede editar
   const searchProducts = async (searchTerm) => {
-    if (!searchTerm.trim()) {
+    if (!searchTerm.trim() || isViewOnly) {
       setFilteredProductos([]);
       return;
     }
@@ -202,6 +272,9 @@ const CotizacionEditPage = () => {
         const codigoTienda = (producto.codigoTienda || '').toLowerCase();
         const codigoProveedor = (producto.codigoProveedor || '').toLowerCase();
         const descripcion = (producto.descripcion || '').toLowerCase();
+        
+        const modelosCompatibles = producto.modelosCompatiblesIds || [];
+        const modelosCompatiblesText = modelosCompatibles.join(' ').toLowerCase();
         const modelosCompatiblesTexto = (producto.modelosCompatiblesTexto || '').toLowerCase();
 
         return nombre.includes(searchTermLower) ||
@@ -209,6 +282,7 @@ const CotizacionEditPage = () => {
               codigoTienda.includes(searchTermLower) ||
               codigoProveedor.includes(searchTermLower) ||
               descripcion.includes(searchTermLower) ||
+              modelosCompatiblesText.includes(searchTermLower) ||
               modelosCompatiblesTexto.includes(searchTermLower);
       });
 
@@ -221,7 +295,10 @@ const CotizacionEditPage = () => {
     }
   };
 
+  // Efecto para buscar productos con debounce - solo si puede editar
   useEffect(() => {
+    if (isViewOnly) return;
+
     const timeoutId = setTimeout(() => {
       if (searchTerm.trim()) {
         searchProducts(searchTerm);
@@ -231,31 +308,15 @@ const CotizacionEditPage = () => {
     }, 300);
 
     return () => clearTimeout(timeoutId);
-  }, [searchTerm]);
+  }, [searchTerm, isViewOnly]);
 
-  // Actualizar datos de la cotización
-  const handleUpdateNumeroCotizacion = async (nuevoNumero) => {
-    if (!cotizacionData?.id) return;
-
-    try {
-      const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
-      await updateDoc(cotizacionRef, {
-        numeroCotizacion: nuevoNumero || null,
-        updatedAt: serverTimestamp(),
-      });
-      setNumeroCotizacion(nuevoNumero);
-    } catch (err) {
-      console.error("Error al actualizar número:", err);
-      setError("Error al actualizar número de cotización");
-    }
-  };
-
+  // Funciones de edición - solo disponibles si puede editar
   const handleUpdateCliente = async (selectedOption) => {
-    if (!cotizacionData?.id) return;
+    if (!cotizacion?.id || isViewOnly) return;
 
     try {
       await runTransaction(db, async (transaction) => {
-        const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
+        const cotizacionRef = doc(db, 'cotizaciones', cotizacion.id);
         let clientData = { nombre: 'Cliente Pendiente', apellido: '', dni: null };
 
         if (selectedOption) {
@@ -284,11 +345,11 @@ const CotizacionEditPage = () => {
   };
 
   const handleUpdateEmpleado = async (selectedOption) => {
-    if (!cotizacionData?.id) return;
+    if (!cotizacion?.id || isViewOnly) return;
 
     try {
       await runTransaction(db, async (transaction) => {
-        const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
+        const cotizacionRef = doc(db, 'cotizaciones', cotizacion.id);
         let employeeData = { nombre: '', apellido: '', puesto: '' };
 
         if (selectedOption) {
@@ -317,10 +378,10 @@ const CotizacionEditPage = () => {
   };
 
   const handleUpdatePlaca = async (nuevaPlaca) => {
-    if (!cotizacionData?.id) return;
+    if (!cotizacion?.id || isViewOnly) return;
 
     try {
-      const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
+      const cotizacionRef = doc(db, 'cotizaciones', cotizacion.id);
       await updateDoc(cotizacionRef, {
         placaMoto: nuevaPlaca || null,
         updatedAt: serverTimestamp(),
@@ -333,10 +394,10 @@ const CotizacionEditPage = () => {
   };
 
   const handleUpdateMetodoPago = async (nuevoMetodo) => {
-    if (!cotizacionData?.id) return;
+    if (!cotizacion?.id || isViewOnly) return;
 
     try {
-      const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
+      const cotizacionRef = doc(db, 'cotizaciones', cotizacion.id);
       await updateDoc(cotizacionRef, {
         metodoPago: nuevoMetodo,
         updatedAt: serverTimestamp(),
@@ -349,10 +410,10 @@ const CotizacionEditPage = () => {
   };
 
   const handleUpdateObservaciones = async (nuevasObservaciones) => {
-    if (!cotizacionData?.id) return;
+    if (!cotizacion?.id || isViewOnly) return;
 
     try {
-      const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
+      const cotizacionRef = doc(db, 'cotizaciones', cotizacion.id);
       await updateDoc(cotizacionRef, {
         observaciones: nuevasObservaciones,
         updatedAt: serverTimestamp(),
@@ -364,119 +425,184 @@ const CotizacionEditPage = () => {
     }
   };
 
-  // Funciones para productos
+  // Funciones para productos (solo en modo edición)
   const handleSelectProduct = (product) => {
+    if (isViewOnly) return;
+    
     setSelectedProduct(product);
     setPrecioVenta(parseFloat(product.precioVentaDefault || 0));
     setQuantity(1);
     setShowQuantityModal(true);
   };
 
+  const obtenerLotesDisponiblesFIFO = async (productoId) => {
+    try {
+      const lotesQuery = query(
+        collection(db, 'lotes'),
+        where('productoId', '==', productoId),
+        where('stockRestante', '>', 0),
+        where('estado', '==', 'activo'),
+        orderBy('fechaIngreso', 'asc')
+      );
+      
+      const lotesSnapshot = await getDocs(lotesQuery);
+      return lotesSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+    } catch (error) {
+      console.error("Error al obtener lotes disponibles:", error);
+      throw error;
+    }
+  };
+
+  const crearItemsSeparadosPorLote = async (producto, cantidadTotal, precioVenta, lotesDisponibles) => {
+    const itemsSeparados = [];
+    let cantidadPendiente = cantidadTotal;
+
+    for (const lote of lotesDisponibles) {
+      if (cantidadPendiente <= 0) break;
+
+      const cantidadDelLote = Math.min(cantidadPendiente, lote.stockRestante);
+      const gananciaUnitaria = precioVenta - lote.precioCompraUnitario;
+      const gananciaTotal = cantidadDelLote * gananciaUnitaria;
+
+      const item = {
+        productoId: producto.id,
+        nombreProducto: producto.nombre,
+        marca: producto.marca || '',
+        codigoTienda: producto.codigoTienda || '',
+        color: producto.color || '',
+        medida: producto.medida || 'N/A',
+        precioCompraDefault: parseFloat(producto.precioCompraDefault || 0),
+        precioVentaMinimo: parseFloat(producto.precioVentaMinimo || 0),
+        descripcion: producto.descripcion || '',
+        cantidad: cantidadDelLote,
+        precioVentaUnitario: precioVenta.toFixed(2),
+        subtotal: (cantidadDelLote * precioVenta).toFixed(2),
+        loteId: lote.id,
+        numeroLote: lote.numeroLote,
+        precioCompraUnitario: lote.precioCompraUnitario,
+        gananciaUnitaria: gananciaUnitaria,
+        gananciaTotal: gananciaTotal,
+        loteOriginal: {
+          id: lote.id,
+          numeroLote: lote.numeroLote,
+          precioCompraUnitario: lote.precioCompraUnitario,
+          fechaIngreso: lote.fechaIngreso
+        }
+      };
+
+      itemsSeparados.push(item);
+      cantidadPendiente -= cantidadDelLote;
+    }
+
+    if (cantidadPendiente > 0) {
+      throw new Error(`Stock insuficiente. Faltan ${cantidadPendiente} unidades del producto.`);
+    }
+
+    return itemsSeparados;
+  };
+
   const handleAddProductToCotizacion = async () => {
-    if (!cotizacionData?.id || !selectedProduct) return;
+    if (!cotizacion?.id || !selectedProduct || isViewOnly) return;
+
+    const existsInCotizacion = itemsCotizacion.some(item => item.productoId === selectedProduct.id);
+    if (existsInCotizacion) {
+      alert('Este producto ya ha sido añadido a la cotización. Edite la cantidad en la tabla.');
+      setShowQuantityModal(false);
+      return;
+    }
+
+    if ((selectedProduct.stockActual || 0) < quantity) {
+      alert(`Stock insuficiente para ${selectedProduct.nombre}. Stock disponible: ${selectedProduct.stockActual || 0}`);
+      return;
+    }
 
     try {
-      const cotizacionItemsRef = collection(db, 'cotizaciones', cotizacionData.id, 'itemsCotizacion');
-      const existingItemQuery = query(cotizacionItemsRef, where('productoId', '==', selectedProduct.id));
-      const existingItemSnapshot = await getDocs(existingItemQuery);
+      const lotesDisponibles = await obtenerLotesDisponiblesFIFO(selectedProduct.id);
+      const itemsSeparados = await crearItemsSeparadosPorLote(selectedProduct, quantity, precioVenta, lotesDisponibles);
 
       await runTransaction(db, async (transaction) => {
-        const productRef = doc(db, 'productos', selectedProduct.id);
-        const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
-
-        const productSnap = await transaction.get(productRef);
+        const cotizacionRef = doc(db, 'cotizaciones', cotizacion.id);
         const cotizacionSnap = await transaction.get(cotizacionRef);
-
-        if (!productSnap.exists() || !cotizacionSnap.exists()) {
-          throw new Error("Producto o cotización no encontrada");
+        
+        if (!cotizacionSnap.exists()) {
+          throw new Error("Cotización no encontrada");
         }
 
-        const productData = productSnap.data();
+        let totalSubtotal = 0;
+        let totalGanancia = 0;
 
-        let itemRef;
-        let newQuantity;
-        let oldSubtotal = 0;
-
-        if (!existingItemSnapshot.empty) {
-          const existingItemDoc = existingItemSnapshot.docs[0];
-          itemRef = existingItemDoc.ref;
-          const existingItemData = existingItemDoc.data();
-          oldSubtotal = parseFloat(existingItemData.subtotal || 0);
-          newQuantity = existingItemData.cantidad + quantity;
-          const newSubtotal = newQuantity * precioVenta;
-
-          transaction.update(itemRef, {
-            cantidad: newQuantity,
-            subtotal: newSubtotal,
-            precioVentaUnitario: precioVenta,
-            color: productData.color || '',
-            updatedAt: serverTimestamp(),
-          });
-        } else {
-          itemRef = doc(cotizacionItemsRef);
-          newQuantity = quantity;
-          const newSubtotal = newQuantity * precioVenta;
-
+        for (const item of itemsSeparados) {
+          const itemRef = doc(collection(db, 'cotizaciones', cotizacion.id, 'itemsCotizacion'));
+          
           transaction.set(itemRef, {
-            productoId: selectedProduct.id,
-            nombreProducto: productData.nombre || selectedProduct.nombre,
-            marca: productData.marca || selectedProduct.marca || '',
-            codigoTienda: productData.codigoTienda || selectedProduct.codigoTienda || '',
-            descripcion: productData.descripcion || selectedProduct.descripcion || '',
-            color: productData.color || selectedProduct.color || '',
-            cantidad: newQuantity,
-            precioVentaUnitario: precioVenta,
-            subtotal: newSubtotal,
+            ...item,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
+
+          totalSubtotal += parseFloat(item.subtotal);
+          totalGanancia += parseFloat(item.gananciaTotal);
         }
 
         const currentTotal = parseFloat(cotizacionSnap.data().totalCotizacion || 0);
-        const finalItemSubtotal = newQuantity * precioVenta;
-        const updatedTotal = currentTotal - oldSubtotal + finalItemSubtotal;
+        const currentGananciaTotal = parseFloat(cotizacionSnap.data().gananciaTotalCotizacion || 0);
+        
+        const updatedTotal = currentTotal + totalSubtotal;
+        const updatedGananciaTotal = currentGananciaTotal + totalGanancia;
 
         transaction.update(cotizacionRef, {
           totalCotizacion: parseFloat(updatedTotal.toFixed(2)),
+          gananciaTotalCotizacion: parseFloat(updatedGananciaTotal.toFixed(2)),
           updatedAt: serverTimestamp(),
         });
       });
 
-      // Refrescar items
-      fetchItemsCotizacion();
       setShowQuantityModal(false);
-      alert('Producto agregado exitosamente');
+      alert(`Producto agregado exitosamente y separado automáticamente en ${itemsSeparados.length} lote(s) FIFO`);
     } catch (err) {
       console.error("Error al agregar producto:", err);
-      setError("Error al agregar producto a la cotización");
+      setError("Error al agregar producto a la cotización: " + err.message);
     }
   };
 
-  const fetchItemsCotizacion = async () => {
+  const obtenerPrecioCompraFIFO = async (productoId) => {
     try {
-      const qItems = query(
-        collection(db, 'cotizaciones', cotizacionData.id, 'itemsCotizacion'),
-        orderBy('createdAt', 'asc')
+      const lotesQuery = query(
+        collection(db, 'lotes'),
+        where('productoId', '==', productoId),
+        where('stockRestante', '>', 0),
+        where('estado', '==', 'activo'),
+        orderBy('fechaIngreso', 'asc'),
+        limit(1)
       );
-      const itemsSnapshot = await getDocs(qItems);
-      const itemsList = itemsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setItemsCotizacion(itemsList);
-
-      // Actualizar datos de cotización
-      const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
-      const cotizacionDoc = await getDoc(cotizacionRef);
-      if (cotizacionDoc.exists()) {
-        setCotizacionData({ id: cotizacionDoc.id, ...cotizacionDoc.data() });
+      
+      const lotesSnapshot = await getDocs(lotesQuery);
+      
+      if (!lotesSnapshot.empty) {
+        const primerLote = lotesSnapshot.docs[0].data();
+        return parseFloat(primerLote.precioCompraUnitario || 0);
+      } else {
+        const productRef = doc(db, 'productos', productoId);
+        const productSnap = await getDoc(productRef);
+        
+        if (productSnap.exists()) {
+          return parseFloat(productSnap.data().precioCompraDefault || 0);
+        }
+        
+        return 0;
       }
-    } catch (err) {
-      console.error("Error al cargar items:", err);
+    } catch (error) {
+      console.error(`Error al obtener precio FIFO para producto ${productoId}:`, error);
+      return 0;
     }
   };
 
   const handleEditItem = (item) => {
+    if (isViewOnly) return;
+    
     setEditingItem(item);
     setEditQuantity(item.cantidad);
     setEditPrecio(parseFloat(item.precioVentaUnitario || 0));
@@ -484,40 +610,53 @@ const CotizacionEditPage = () => {
   };
 
   const handleUpdateItem = async () => {
-    if (!cotizacionData?.id || !editingItem) return;
+    if (!cotizacion?.id || !editingItem || isViewOnly) return;
 
     try {
       await runTransaction(db, async (transaction) => {
-        const itemRef = doc(db, 'cotizaciones', cotizacionData.id, 'itemsCotizacion', editingItem.id);
-        const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
+        const itemRef = doc(db, 'cotizaciones', cotizacion.id, 'itemsCotizacion', editingItem.id);
+        const cotizacionRef = doc(db, 'cotizaciones', cotizacion.id);
 
         const cotizacionSnap = await transaction.get(cotizacionRef);
+        
         if (!cotizacionSnap.exists()) {
           throw new Error("Cotización no encontrada");
         }
 
+        const precioCompraFIFO = await obtenerPrecioCompraFIFO(editingItem.productoId);
+        const nuevaGananciaUnitaria = editPrecio - precioCompraFIFO;
+        
         const oldSubtotal = parseFloat(editingItem.subtotal || 0);
+        const oldGananciaTotal = parseFloat(editingItem.gananciaTotal || 0);
+        
         const newSubtotal = editQuantity * editPrecio;
+        const newGananciaTotal = editQuantity * nuevaGananciaUnitaria;
 
         transaction.update(itemRef, {
           cantidad: editQuantity,
           precioVentaUnitario: editPrecio,
           subtotal: newSubtotal,
+          precioCompraUnitario: precioCompraFIFO,
+          gananciaUnitaria: nuevaGananciaUnitaria,
+          gananciaTotal: newGananciaTotal,
           updatedAt: serverTimestamp(),
         });
 
         const currentTotal = parseFloat(cotizacionSnap.data().totalCotizacion || 0);
+        const currentGananciaTotal = parseFloat(cotizacionSnap.data().gananciaTotalCotizacion || 0);
+        
         const updatedTotal = currentTotal - oldSubtotal + newSubtotal;
+        const updatedGananciaTotal = currentGananciaTotal - oldGananciaTotal + newGananciaTotal;
 
         transaction.update(cotizacionRef, {
           totalCotizacion: parseFloat(updatedTotal.toFixed(2)),
+          gananciaTotalCotizacion: parseFloat(updatedGananciaTotal.toFixed(2)),
           updatedAt: serverTimestamp(),
         });
       });
 
-      fetchItemsCotizacion();
       setShowEditItemModal(false);
-      alert('Producto actualizado exitosamente');
+      alert('Producto actualizado exitosamente con precio FIFO real');
     } catch (err) {
       console.error("Error al actualizar item:", err);
       setError("Error al actualizar producto");
@@ -525,31 +664,40 @@ const CotizacionEditPage = () => {
   };
 
   const handleRemoveItem = async (itemId, subtotal) => {
-    if (!cotizacionData?.id || !itemId) return;
+    if (!cotizacion?.id || !itemId || isViewOnly) return;
 
     if (!window.confirm('¿Eliminar este producto de la cotización?')) return;
 
     try {
       await runTransaction(db, async (transaction) => {
-        const itemRef = doc(db, 'cotizaciones', cotizacionData.id, 'itemsCotizacion', itemId);
-        const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
+        const itemRef = doc(db, 'cotizaciones', cotizacion.id, 'itemsCotizacion', itemId);
+        const cotizacionRef = doc(db, 'cotizaciones', cotizacion.id);
 
         const cotizacionSnap = await transaction.get(cotizacionRef);
-        if (!cotizacionSnap.exists()) {
-          throw new Error("Cotización no encontrada");
+        const itemSnap = await transaction.get(itemRef);
+        
+        if (!cotizacionSnap.exists() || !itemSnap.exists()) {
+          throw new Error("Cotización o item no encontrado");
         }
 
+        const itemData = itemSnap.data();
+        const itemGananciaTotal = parseFloat(itemData.gananciaTotal || 0);
+
         const currentTotal = parseFloat(cotizacionSnap.data().totalCotizacion || 0);
+        const currentGananciaTotal = parseFloat(cotizacionSnap.data().gananciaTotalCotizacion || 0);
+        
         const updatedTotal = currentTotal - parseFloat(subtotal);
+        const updatedGananciaTotal = currentGananciaTotal - itemGananciaTotal;
 
         transaction.delete(itemRef);
+        
         transaction.update(cotizacionRef, {
           totalCotizacion: parseFloat(updatedTotal.toFixed(2)),
+          gananciaTotalCotizacion: parseFloat(updatedGananciaTotal.toFixed(2)),
           updatedAt: serverTimestamp(),
         });
       });
 
-      fetchItemsCotizacion();
       alert('Producto eliminado de la cotización');
     } catch (err) {
       console.error("Error al eliminar item:", err);
@@ -557,9 +705,8 @@ const CotizacionEditPage = () => {
     }
   };
 
-  // Confirmar cotización
-  const handleConfirmarCotizacion = async () => {
-    if (!cotizacionData?.id) return;
+  const handleGuardarCotizacion = async () => {
+    if (!cotizacion?.id || isViewOnly) return;
 
     if (!selectedCliente) {
       alert('Por favor selecciona un cliente');
@@ -571,131 +718,123 @@ const CotizacionEditPage = () => {
       return;
     }
 
-    if (!window.confirm('¿Confirmar esta cotización? Esto la convertirá en una VENTA y afectará el stock actual.')) {
+    if (!window.confirm('¿Guardar los cambios en esta cotización?')) {
       return;
     }
 
-    setLoading(true);
     try {
-      await runTransaction(db, async (transaction) => {
-        const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
-        const cotizacionSnap = await transaction.get(cotizacionRef);
-
-        if (!cotizacionSnap.exists()) {
-          throw new Error("Cotización no encontrada.");
-        }
-
-        const currentCotizacionData = cotizacionSnap.data();
-        if (currentCotizacionData.estado === 'confirmada' || currentCotizacionData.estado === 'cancelada') {
-          throw new Error("Esta cotización ya ha sido confirmada o cancelada.");
-        }
-
-        const itemsCotizacionCollectionRef = collection(db, 'cotizaciones', cotizacionData.id, 'itemsCotizacion');
-        const itemsCotizacionSnapshot = await getDocs(itemsCotizacionCollectionRef);
-
-        if (itemsCotizacionSnapshot.empty) {
-          throw new Error("No se encontraron productos asociados a esta cotización.");
-        }
-
-        const productoRefsAndData = [];
-        for (const itemDoc of itemsCotizacionSnapshot.docs) {
-          const itemData = itemDoc.data();
-          const productoRef = doc(db, 'productos', itemData.productoId);
-          const productoSnap = await transaction.get(productoRef);
-
-          if (productoSnap.exists()) {
-            productoRefsAndData.push({
-              itemData: itemData,
-              productoRef: productoRef,
-              currentProductoData: productoSnap.data(),
-            });
-          } else {
-            throw new Error(`Producto con ID ${itemData.productoId} no encontrado.`);
-          }
-        }
-
-        for (const { itemData, currentProductoData } of productoRefsAndData) {
-          const currentStock = typeof currentProductoData.stockActual === 'number' ? currentProductoData.stockActual : 0;
-          const cantidadVendida = typeof itemData.cantidad === 'number' ? itemData.cantidad : 0;
-          if (currentStock < cantidadVendida) {
-            throw new Error(`Stock insuficiente para el producto "${itemData.nombreProducto}". Stock actual: ${currentStock}, Cantidad solicitada: ${cantidadVendida}.`);
-          }
-        }
-
-        const newVentaRef = doc(collection(db, 'ventas'));
-        transaction.set(newVentaRef, {
-          cotizacionId: cotizacionData.id,
-          clienteId: currentCotizacionData.clienteId,
-          clienteNombre: currentCotizacionData.clienteNombre,
-          totalVenta: currentCotizacionData.totalCotizacion,
-          fechaVenta: serverTimestamp(),
-          empleadoId: user.email || user.uid,
-          observaciones: currentCotizacionData.observaciones || 'Convertido de cotización',
-          estado: 'completada',
-          metodoPago: currentCotizacionData.metodoPago || 'Efectivo',
-          tipoVenta: 'cotizacionAprobada',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-
-        for (const { itemData, productoRef, currentProductoData } of productoRefsAndData) {
-          const currentStock = typeof currentProductoData.stockActual === 'number' ? currentProductoData.stockActual : 0;
-          const cantidadVendida = typeof itemData.cantidad === 'number' ? itemData.cantidad : 0;
-          const newStock = currentStock - cantidadVendida;
-
-          transaction.update(productoRef, {
-            stockActual: newStock,
-            updatedAt: serverTimestamp(),
-          });
-
-          transaction.set(doc(collection(newVentaRef, 'itemsVenta')), {
-            productoId: itemData.productoId,
-            nombreProducto: itemData.nombreProducto,
-            cantidad: itemData.cantidad,
-            precioVentaUnitario: itemData.precioVentaUnitario,
-            subtotal: itemData.subtotal,
-            createdAt: serverTimestamp(),
-          });
-        }
-
-        transaction.update(cotizacionRef, { estado: 'confirmada', updatedAt: serverTimestamp() });
-      });
-
-      alert('Cotización confirmada y convertida en Venta con éxito.');
-      router.push('/cotizaciones');
-    } catch (err) {
-      console.error("Error al confirmar cotización:", err);
-      setError("Error al confirmar la cotización. " + err.message);
-      alert('Hubo un error al confirmar la cotización: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Cancelar cotización
-  const handleCancelarCotizacion = async () => {
-    if (!cotizacionData?.id) return;
-
-    if (!window.confirm('¿Cancelar esta cotización? Esto la marcará como inactiva y no afectará el stock.')) {
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const cotizacionRef = doc(db, 'cotizaciones', cotizacionData.id);
+      const cotizacionRef = doc(db, 'cotizaciones', cotizacion.id);
       await updateDoc(cotizacionRef, {
-        estado: 'cancelada',
+        estado: 'pendiente',
+        metodoPago: paymentData.isMixedPayment ? 'mixto' : (paymentData.paymentMethods[0]?.method || metodoPago || 'efectivo'),
+        paymentData: paymentData,
+        placaMoto: placaMoto || null,
+        observaciones: observaciones || '',
+        fechaGuardado: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
 
-      alert('Cotización cancelada con éxito.');
-      router.push('/cotizaciones');
+      alert('Cotización actualizada exitosamente.');
+      
     } catch (err) {
-      console.error("Error al cancelar cotización:", err);
-      setError("Error al cancelar la cotización. " + err.message);
-      alert('Hubo un error al cancelar la cotización: ' + err.message);
-    } finally {
-      setLoading(false);
+      console.error("Error al guardar cotización:", err);
+      alert('Error al guardar cotización: ' + err.message);
+    }
+  };
+
+  const handlePaymentConfirm = (newPaymentData) => {
+    setPaymentData(newPaymentData);
+    setShowPaymentModal(false);
+  };
+
+  const openPaymentModal = () => {
+    if (isViewOnly) return;
+    
+    const total = parseFloat(cotizacion?.totalCotizacion || 0);
+    if (total <= 0) {
+      setError('Debe añadir al menos un producto antes de configurar el pago.');
+      return;
+    }
+    setShowPaymentModal(true);
+  };
+
+  // Función para imprimir PDF
+  const handleImprimirCotizacion = async () => {
+    try {
+      const loadingToast = document.createElement('div');
+      loadingToast.innerHTML = `
+        <div class="fixed top-4 right-4 bg-blue-500 text-white px-4 py-2 rounded-lg shadow-lg z-50">
+          <div class="flex items-center">
+            <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+            Generando PDF...
+          </div>
+        </div>
+      `;
+      document.body.appendChild(loadingToast);
+
+      let clienteData = null;
+      if (cotizacion.clienteId && cotizacion.clienteId !== 'general') {
+        try {
+          const clienteDoc = await getDoc(doc(db, 'clientes', cotizacion.clienteId));
+          if (clienteDoc.exists()) {
+            clienteData = clienteDoc.data();
+          }
+        } catch (error) {
+          console.warn('No se pudo obtener información del cliente:', error);
+        }
+      }
+
+      await generarPDFCotizacionCompleta(cotizacion.id, cotizacion, clienteData);
+      
+      document.body.removeChild(loadingToast);
+      
+      const successToast = document.createElement('div');
+      successToast.innerHTML = `
+        <div class="fixed top-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg z-50">
+          <div class="flex items-center">
+            <svg class="h-4 w-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+            PDF generado exitosamente
+          </div>
+        </div>
+      `;
+      document.body.appendChild(successToast);
+      
+      setTimeout(() => {
+        if (document.body.contains(successToast)) {
+          document.body.removeChild(successToast);
+        }
+      }, 3000);
+
+    } catch (error) {
+      const loadingElements = document.querySelectorAll('div[class*="fixed top-4 right-4 bg-blue-500"]');
+      loadingElements.forEach(el => {
+        if (document.body.contains(el.parentElement)) {
+          document.body.removeChild(el.parentElement);
+        }
+      });
+
+      console.error('Error al generar PDF:', error);
+      
+      const errorToast = document.createElement('div');
+      errorToast.innerHTML = `
+        <div class="fixed top-4 right-4 bg-red-500 text-white px-4 py-2 rounded-lg shadow-lg z-50">
+          <div class="flex items-center">
+            <svg class="h-4 w-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+            </svg>
+            Error al generar PDF
+          </div>
+        </div>
+      `;
+      document.body.appendChild(errorToast);
+      
+      setTimeout(() => {
+        if (document.body.contains(errorToast)) {
+          document.body.removeChild(errorToast);
+        }
+      }, 3000);
     }
   };
 
@@ -709,36 +848,80 @@ const CotizacionEditPage = () => {
     label: `${empleado.nombre} ${empleado.apellido || ''} - ${empleado.puesto || ''}`.trim()
   }));
 
-  if (!user || loadingData) {
+  const getEstadoBadge = (estado) => {
+    switch (estado) {
+      case 'confirmada':
+        return (
+          <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800 border border-green-200">
+            <CheckIcon className="h-4 w-4 mr-1" />
+            Confirmada
+          </span>
+        );
+      case 'cancelada':
+        return (
+          <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800 border border-red-200">
+            <XMarkIcon className="h-4 w-4 mr-1" />
+            Cancelada
+          </span>
+        );
+      case 'pendiente':
+        return (
+          <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-yellow-100 text-yellow-800 border border-yellow-200">
+            <DocumentTextIcon className="h-4 w-4 mr-1" />
+            Pendiente
+          </span>
+        );
+      default:
+        return (
+          <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-800 border border-gray-200">
+            <DocumentTextIcon className="h-4 w-4 mr-1" />
+            Borrador
+          </span>
+        );
+    }
+  };
+
+  if (!user) return null;
+
+  if (loading && !cotizacion) {
     return (
-      <Layout title="Cargando...">
-        <div className="flex justify-center items-center h-64">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      <Layout title="Cargando Cotización...">
+        <div className="min-h-screen bg-gray-50 py-6">
+          <div className="max-w-full mx-auto px-6 sm:px-8 lg:px-12">
+            <div className="flex justify-center items-center h-64">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+            </div>
+          </div>
         </div>
       </Layout>
     );
   }
 
-  if (!cotizacionData) {
+  if (!cotizacion) {
     return (
       <Layout title="Cotización no encontrada">
-        <div className="text-center py-12">
-          <p className="text-gray-500">Cotización no encontrada</p>
-          <button
-            onClick={() => router.push('/cotizaciones')}
-            className="mt-4 bg-blue-600 text-white px-4 py-2 rounded-lg"
-          >
-            Volver a Cotizaciones
-          </button>
+        <div className="min-h-screen bg-gray-50 py-6">
+          <div className="max-w-full mx-auto px-6 sm:px-8 lg:px-12">
+            <div className="bg-white rounded-xl shadow-lg overflow-hidden p-8 text-center">
+              <ExclamationTriangleIcon className="h-16 w-16 mx-auto mb-4 text-red-500" />
+              <h2 className="text-2xl font-bold text-gray-900 mb-2">Cotización no encontrada</h2>
+              <p className="text-gray-600 mb-6">La cotización que buscas no existe o no tienes permisos para verla.</p>
+              <button
+                onClick={() => router.push('/cotizaciones')}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+              >
+                <ArrowLeftIcon className="h-4 w-4 mr-2" />
+                Volver a Cotizaciones
+              </button>
+            </div>
+          </div>
         </div>
       </Layout>
     );
   }
 
-  const canEdit = cotizacionData.estado === 'pendiente' || cotizacionData.estado === 'borrador';
-
   return (
-    <Layout title={`Editar Cotización ${cotizacionData.numeroCotizacion || cotizacionData.id}`}>
+    <Layout title={isViewOnly ? `Ver Cotización ${cotizacion.numeroCotizacion}` : `Editar Cotización ${cotizacion.numeroCotizacion}`}>
       <div className="min-h-screen bg-gray-50 py-6">
         <div className="max-w-full mx-auto px-6 sm:px-8 lg:px-12">
           {error && (
@@ -748,85 +931,82 @@ const CotizacionEditPage = () => {
           )}
 
           <div className="bg-white rounded-xl shadow-lg overflow-hidden">
-            {/* Header */}
-            <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white p-6">
-              <div className="flex justify-between items-center">
-                <div>
-                  <h1 className="text-2xl font-bold">Editar Cotización</h1>
-                  <p className="text-blue-100">{cotizacionData.numeroCotizacion || `ID: ${cotizacionData.id}`}</p>
-                </div>
-                <div className="flex space-x-3">
+            {/* Header con información de la cotización */}
+            <div className="bg-gradient-to-r from-blue-600 to-blue-700 px-6 py-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-4">
                   <button
                     onClick={() => router.push('/cotizaciones')}
-                    className="bg-white bg-opacity-20 hover:bg-opacity-30 text-white px-4 py-2 rounded-lg flex items-center transition-colors"
+                    className="text-white hover:text-blue-100 p-2 rounded-full hover:bg-blue-800 transition-colors"
                   >
-                    <ArrowLeftIcon className="h-5 w-5 mr-2" />
-                    Volver
+                    <ArrowLeftIcon className="h-5 w-5" />
                   </button>
+                  <div>
+                    <h1 className="text-2xl font-bold text-white">
+                      {isViewOnly ? 'Ver Cotización' : 'Editar Cotización'}: {cotizacion.numeroCotizacion}
+                    </h1>
+                    <p className="text-blue-100 text-sm">
+                      Cliente: {cotizacion.clienteNombre} | 
+                      Creado: {cotizacion.fechaCreacion?.toDate?.() ? 
+                        cotizacion.fechaCreacion.toDate().toLocaleDateString() : 
+                        'Fecha N/A'
+                      }
+                    </p>
+                  </div>
                 </div>
               </div>
+
             </div>
 
+            
+
             <div className="grid grid-cols-12 gap-6 p-6">
-              {/* Panel Izquierdo - Información de la Cotización */}
+              {/* Panel Izquierdo - Datos de la Cotización */}
               <div className="col-span-12 lg:col-span-4">
-                <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                  <h2 className="text-lg font-semibold mb-4 text-gray-800">Información de la Cotización</h2>
-                  
-                  {/* Estado actual */}
-                  <div className="mb-4 p-3 rounded-lg border">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium text-gray-700">Estado actual:</span>
-                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                        cotizacionData.estado === 'confirmada' ? 'bg-green-100 text-green-800' :
-                        cotizacionData.estado === 'cancelada' ? 'bg-red-100 text-red-800' :
-                        'bg-yellow-100 text-yellow-800'
-                      }`}>
-                        {cotizacionData.estado?.toUpperCase() || 'PENDIENTE'}
-                      </span>
-                    </div>
+                <div className="bg-gray-50 rounded-lg overflow-hidden">
+                  <div className="p-4 bg-gray-100">
+                    <h3 className="font-semibold text-lg text-gray-800">
+                      {isViewOnly ? 'Información de la Cotización' : 'Editar Cotización'}
+                    </h3>
                   </div>
-
-                  <div className="space-y-4">
-                    {/* Número de Cotización */}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Número de Cotización:</label>
-                      <input
-                        type="text"
-                        value={numeroCotizacion}
-                        onChange={(e) => handleUpdateNumeroCotizacion(e.target.value)}
-                        placeholder="Ej: COT-2024-001"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        disabled={!canEdit}
-                      />
-                    </div>
-
+                  
+                  <div className="p-4 space-y-4">
                     {/* Cliente */}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">Cliente:</label>
-                      <Select
-                        options={clienteOptions}
-                        value={selectedCliente}
-                        onChange={handleUpdateCliente}
-                        placeholder="Seleccionar cliente..."
-                        className="text-sm"
-                        isClearable
-                        isDisabled={!canEdit}
-                      />
+                      {isViewOnly ? (
+                        <div className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900">
+                          {cotizacion.clienteNombre}
+                        </div>
+                      ) : (
+                        <Select
+                          options={clienteOptions}
+                          value={selectedCliente}
+                          onChange={handleUpdateCliente}
+                          placeholder="Seleccionar cliente..."
+                          className="text-sm"
+                          isClearable
+                        />
+                      )}
                     </div>
 
                     {/* Empleado */}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">Empleado:</label>
-                      <Select
-                        options={empleadoOptions}
-                        value={selectedEmpleado}
-                        onChange={handleUpdateEmpleado}
-                        placeholder="Seleccionar empleado..."
-                        className="text-sm"
-                        isClearable
-                        isDisabled={!canEdit}
-                      />
+                      {isViewOnly ? (
+                        <div className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900">
+                          {cotizacion.empleadoAsignadoNombre || 'No asignado'}
+                        </div>
+                      ) : (
+                        <Select
+                          options={empleadoOptions}
+                          value={selectedEmpleado}
+                          onChange={handleUpdateEmpleado}
+                          placeholder="Seleccionar empleado..."
+                          className="text-sm"
+                          isClearable
+                        />
+                      )}
                     </div>
 
                     {/* Placa Moto */}
@@ -835,29 +1015,63 @@ const CotizacionEditPage = () => {
                       <input
                         type="text"
                         value={placaMoto}
-                        onChange={(e) => handleUpdatePlaca(e.target.value)}
+                        onChange={(e) => isViewOnly ? null : handleUpdatePlaca(e.target.value)}
                         placeholder="Ej: ABC-123"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        disabled={!canEdit}
+                        readOnly={isViewOnly}
+                        className={`w-full px-3 py-2 border border-gray-300 rounded-lg ${
+                          isViewOnly 
+                            ? 'bg-gray-50 text-gray-700 cursor-not-allowed' 
+                            : 'focus:ring-2 focus:ring-blue-500 focus:border-transparent'
+                        }`}
                       />
                     </div>
 
-                    {/* Método de Pago */}
+                    {/* Configuración de Pago */}
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Método de Pago:</label>
-                      <select
-                        value={metodoPago}
-                        onChange={(e) => handleUpdateMetodoPago(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        disabled={!canEdit}
-                      >
-                        <option value="">Seleccionar...</option>
-                        <option value="efectivo">Efectivo</option>
-                        <option value="tarjeta">Tarjeta</option>
-                        <option value="transferencia">Transferencia</option>
-                        <option value="yape">Yape</option>
-                        <option value="plin">Plin</option>
-                      </select>
+                      <div className="flex items-center justify-between mb-3">
+                        <label className="block text-sm font-medium text-gray-700">Pago:</label>
+                        {!isViewOnly && (
+                          <button
+                            type="button"
+                            onClick={openPaymentModal}
+                            className="inline-flex items-center px-3 py-1 border border-transparent text-sm font-medium rounded-lg text-blue-700 bg-blue-100 hover:bg-blue-200"
+                          >
+                            <CreditCardIcon className="h-4 w-4 mr-1" />
+                            Configurar
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="bg-white border border-gray-200 rounded-lg p-3 space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm font-medium text-gray-700">Total:</span>
+                          <span className="text-lg font-bold text-gray-900">
+                            S/. {parseFloat(cotizacion?.totalCotizacion || 0).toFixed(2)}
+                          </span>
+                        </div>
+                        
+                        {paymentData.isMixedPayment ? (
+                          <div className="space-y-1">
+                            {paymentData.paymentMethods.map((pm, index) => (
+                              <div key={index} className="flex justify-between items-center text-sm">
+                                <span className="inline-flex items-center">
+                                  <span className="mr-1">{pm.icon}</span>
+                                  {pm.label}
+                                </span>
+                                <span>S/. {pm.amount.toFixed(2)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="flex justify-between items-center text-sm">
+                            <span className="inline-flex items-center">
+                              <span className="mr-1">{paymentData.paymentMethods[0]?.icon}</span>
+                              {paymentData.paymentMethods[0]?.label}
+                            </span>
+                            <span>S/. {paymentData.paymentMethods[0]?.amount.toFixed(2)}</span>
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     {/* Observaciones */}
@@ -865,71 +1079,46 @@ const CotizacionEditPage = () => {
                       <label className="block text-sm font-medium text-gray-700 mb-2">Observaciones:</label>
                       <textarea
                         value={observaciones}
-                        onChange={(e) => handleUpdateObservaciones(e.target.value)}
+                        onChange={(e) => isViewOnly ? null : handleUpdateObservaciones(e.target.value)}
                         placeholder="Observaciones adicionales..."
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        readOnly={isViewOnly}
+                        className={`w-full px-3 py-2 border border-gray-300 rounded-lg ${
+                          isViewOnly 
+                            ? 'bg-gray-50 text-gray-700 cursor-not-allowed' 
+                            : 'focus:ring-2 focus:ring-blue-500 focus:border-transparent'
+                        }`}
                         rows="3"
-                        disabled={!canEdit}
                       />
                     </div>
 
                     {/* Total */}
                     <div className="bg-gradient-to-r from-green-50 to-green-100 p-4 rounded-lg border border-green-200">
                       <div className="text-lg font-bold text-green-800">
-                        Total: S/. {parseFloat(cotizacionData.totalCotizacion || 0).toFixed(2)}
-                      </div>
-                    </div>
-
-                    {/* Fechas */}
-                    <div className="space-y-2 text-sm text-gray-600">
-                      <div>
-                        <span className="font-medium">Creada:</span>{' '}
-                        {cotizacionData.fechaCreacion?.toDate?.() ? 
-                          cotizacionData.fechaCreacion.toDate().toLocaleDateString('es-ES', {
-                            year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit'
-                          }) : 'N/A'
-                        }
+                        Total: S/. {parseFloat(cotizacion.totalCotizacion || 0).toFixed(2)}
                       </div>
                     </div>
 
                     {/* Botones de acción */}
-                    {canEdit && (
-                      <div className="space-y-3 pt-4 border-t">
+                    {!isViewOnly && (
+                      <div className="space-y-3">
                         <button
-                          onClick={handleConfirmarCotizacion}
-                          disabled={!selectedCliente || itemsCotizacion.length === 0 || loading}
-                          className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white px-4 py-3 rounded-lg flex items-center justify-center font-medium transition-colors"
+                          onClick={handleGuardarCotizacion}
+                          disabled={!selectedCliente || itemsCotizacion.length === 0}
+                          className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white px-4 py-3 rounded-lg flex items-center justify-center font-medium transition-colors"
                         >
-                          <CheckCircleIcon className="h-5 w-5 mr-2" />
-                          Confirmar Cotización
+                          <CheckIcon className="h-5 w-5 mr-2" />
+                          Guardar Cambios
                         </button>
-                        
-                        <button
-                          onClick={handleCancelarCotizacion}
-                          disabled={loading}
-                          className="w-full bg-red-600 hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white px-4 py-3 rounded-lg flex items-center justify-center font-medium transition-colors"
-                        >
-                          <XCircleIcon className="h-5 w-5 mr-2" />
-                          Cancelar Cotización
-                        </button>
-                      </div>
-                    )}
-
-                    {!canEdit && (
-                      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                        <p className="text-yellow-800 text-sm">
-                          <strong>Nota:</strong> Esta cotización no se puede editar porque su estado es "{cotizacionData.estado}".
-                        </p>
                       </div>
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* Panel Derecho - Productos y Buscador */}
+              {/* Panel Derecho - Productos */}
               <div className="col-span-12 lg:col-span-8">
-                {/* Buscador de Productos (solo si se puede editar) */}
-                {canEdit && (
+                {/* Buscador de Productos - Solo si puede editar */}
+                {!isViewOnly && (
                   <div className="bg-white border border-gray-200 rounded-lg mb-6 relative">
                     <div className="p-4">
                       <h2 className="text-lg font-semibold mb-4 text-gray-800">Buscar Productos</h2>
@@ -949,13 +1138,7 @@ const CotizacionEditPage = () => {
                         )}
                       </div>
                       
-                      <div className="text-sm text-gray-600 mt-2">
-                        {searchTerm.trim() === '' ? (
-                          'Escribe para buscar productos...'
-                        ) : (
-                          `${filteredProductos.length} productos encontrados`
-                        )}
-                      </div>
+
                     </div>
 
                     {/* Dropdown de productos */}
@@ -974,38 +1157,51 @@ const CotizacionEditPage = () => {
                             {filteredProductos.slice(0, 20).map(producto => (
                               <div
                                 key={producto.id}
-                                className="p-4 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-b-0 transition-colors"
+                                className="px-4 py-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-b-0 transition-colors"
                                 onClick={() => {
                                   handleSelectProduct(producto);
                                   setSearchTerm('');
                                 }}
                               >
-                                <div className="flex justify-between items-start">
-                                  <div className="flex-1 min-w-0">
-                                    <h4 className="font-medium text-gray-900 truncate">
-                                      {producto.nombre} ({producto.codigoTienda})
-                                    </h4>
-                                    <p className="text-sm text-gray-600 truncate">
-                                      <span className="font-medium">Marca:</span> {producto.marca}
-                                    </p>
-                                    <p className="text-sm text-gray-600 truncate">
-                                      <span className="font-medium">Color:</span> {producto.color || 'N/A'}
-                                    </p>
-                                    <p className="text-sm text-gray-500">
-                                      <span className="font-medium">Stock:</span> {producto.stockActual}
-                                    </p>
+                                <div className="flex items-center justify-between gap-6">
+                                  <div className="flex items-center gap-6 flex-1 min-w-0">
+                                    <div className="min-w-0 flex-shrink-0">
+                                      <h4 className="font-medium text-gray-900 truncate text-sm">
+                                        {producto.nombre} ({producto.codigoTienda})
+                                      </h4>
+                                    </div>
+                                    
+                                    <div className="flex-shrink-0">
+                                      <span className="text-xs text-gray-500 uppercase tracking-wide">Marca:</span>
+                                      <span className="ml-1 text-sm text-gray-700 font-medium">{producto.marca}</span>
+                                    </div>
+                                    
+                                    <div className="flex-shrink-0">
+                                      <span className="text-xs text-gray-500 uppercase tracking-wide">Color:</span>
+                                      <span className="ml-1 text-sm text-gray-700 font-medium">{producto.color || 'N/A'}</span>
+                                    </div>
+                                    
+                                    <div className="flex-shrink-0">
+                                      <span className="text-xs text-gray-500 uppercase tracking-wide">Stock:</span>
+                                      <span className="ml-1 text-sm font-semibold text-gray-900">{producto.stockActual || 0}</span>
+                                    </div>
+                                    
                                     {producto.modelosCompatiblesTexto && (
-                                      <p className="text-sm text-blue-600 truncate">
-                                        <span className="font-medium">Modelos:</span> {producto.modelosCompatiblesTexto}
-                                      </p>
+                                      <div className="flex-shrink-0 max-w-xs">
+                                        <span className="text-xs text-gray-500 uppercase tracking-wide">Modelos:</span>
+                                        <span className="ml-1 text-sm text-blue-700 font-medium truncate" title={producto.modelosCompatiblesTexto}>
+                                          {producto.modelosCompatiblesTexto}
+                                        </span>
+                                      </div>
                                     )}
                                   </div>
-                                  <div className="text-right flex-shrink-0 ml-4">
-                                    <p className="font-semibold text-green-600 text-lg">
+                                  
+                                  <div className="text-right flex-shrink-0">
+                                    <p className="font-bold text-green-600 text-base">
                                       S/. {parseFloat(producto.precioVentaDefault || 0).toFixed(2)}
                                     </p>
-                                    <p className="text-sm text-gray-500">
-                                      Stock: {producto.stockActual || 0}
+                                    <p className="text-xs text-gray-500 uppercase tracking-wide">
+                                      Precio Venta
                                     </p>
                                   </div>
                                 </div>
@@ -1027,13 +1223,8 @@ const CotizacionEditPage = () => {
                 <div className="bg-white border border-gray-200 rounded-lg">
                   <div className="p-4 border-b border-gray-200">
                     <h3 className="text-xl font-semibold text-gray-800">
-                      Productos en la Cotización
+                      Productos de la Cotización
                     </h3>
-                    <div className="mt-3 bg-gradient-to-r from-blue-50 to-blue-100 p-3 rounded-lg border border-blue-200">
-                      <div className="text-lg font-bold text-blue-800">
-                        Total: S/. {parseFloat(cotizacionData.totalCotizacion || 0).toFixed(2)}
-                      </div>
-                    </div>
                   </div>
 
                   <div className="p-4">
@@ -1041,27 +1232,29 @@ const CotizacionEditPage = () => {
                       <div className="text-center py-12">
                         <ShoppingCartIcon className="h-16 w-16 mx-auto mb-4 text-gray-300" />
                         <h4 className="text-lg font-medium text-gray-600 mb-2">No hay productos en esta cotización</h4>
-                        {canEdit ? (
+                        {!isViewOnly && (
                           <p className="text-gray-500">Usa el buscador arriba para encontrar y agregar productos</p>
-                        ) : (
-                          <p className="text-gray-500">Esta cotización no tiene productos asociados</p>
                         )}
                       </div>
                     ) : (
                       <div className="bg-white rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="w-full border-collapse">
-                            <thead className="bg-gray-50">
+                            <thead className="bg-blue-50">
                               <tr className="border-b border-gray-300">
-                                <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600 uppercase tracking-wide w-1/4">NOMBRE</th>
-                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide w-20">CÓDIGO</th>
-                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide w-24">MARCA</th>
-                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide w-16">CANT.</th>
-                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide w-24">P.V. UNIT.</th>
-                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide w-24">COLOR</th>
-                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide w-28">SUBTOTAL</th>
-                                {canEdit && (
-                                  <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide w-24">ACCIONES</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">C. TIENDA</th>
+                                <th className="px-4 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">PRODUCTO</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">LOTE</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">MARCA</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">MEDIDA</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">COLOR</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">CANT.</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">P. COMPRA</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">P. VENTA</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">P. VENTA MIN</th>
+                                <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">SUBTOTAL</th>
+                                {!isViewOnly && (
+                                  <th className="px-3 py-3 text-center text-sm font-semibold text-gray-600 uppercase tracking-wide">ACCIONES</th>
                                 )}
                               </tr>
                             </thead>
@@ -1069,21 +1262,34 @@ const CotizacionEditPage = () => {
                             <tbody>
                               {itemsCotizacion.map((item, index) => (
                                 <tr key={item.id} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                                  <td className="px-4 py-3">
-                                    <div className="font-medium text-gray-900 text-sm">
-                                      {item.nombreProducto}
-                                    </div>
-                                  </td>
-
                                   <td className="px-3 py-3 text-center">
                                     <span className="text-sm text-gray-900 font-medium">
                                       {item.codigoTienda || 'N/A'}
                                     </span>
                                   </td>
-
+                                  <td className="px-4 py-3">
+                                    <div className="font-medium text-gray-900 text-sm">
+                                      {item.nombreProducto}
+                                    </div>
+                                  </td>
+                                  <td className="px-3 py-3 text-center">
+                                    <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-full font-medium">
+                                      {item.numeroLote || 'N/A'}
+                                    </span>
+                                  </td>
                                   <td className="px-3 py-3 text-center">
                                     <span className="text-sm text-gray-700">
                                       {item.marca || 'Sin marca'}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-3 text-center">
+                                    <span className="text-sm text-gray-700">
+                                      {item.medida || 'N/A'}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-3 text-center">
+                                    <span className="text-sm text-gray-600" title={item.color || item.descripcion || 'N/A'}>
+                                      {item.color || item.descripcion || "N/A"}
                                     </span>
                                   </td>
 
@@ -1092,16 +1298,22 @@ const CotizacionEditPage = () => {
                                       {item.cantidad}
                                     </span>
                                   </td>
-
+                                  
+                                  <td className="px-3 py-3 text-center">
+                                    <span className="text-sm font-medium text-gray-900">
+                                      S/. {parseFloat(item.precioCompraDefault || 0).toFixed(2)}
+                                    </span>
+                                  </td>
+                                  
                                   <td className="px-3 py-3 text-center">
                                     <span className="text-sm font-medium text-gray-900">
                                       S/. {parseFloat(item.precioVentaUnitario || 0).toFixed(2)}
                                     </span>
                                   </td>
-
+                                  
                                   <td className="px-3 py-3 text-center">
-                                    <span className="text-sm text-gray-600" title={item.color || item.descripcion || 'N/A'}>
-                                      {item.color || item.descripcion || "N/A"}
+                                    <span className="text-sm font-medium text-gray-900">
+                                      S/. {parseFloat(item.precioVentaMinimo || 0).toFixed(2)}
                                     </span>
                                   </td>
 
@@ -1111,7 +1323,7 @@ const CotizacionEditPage = () => {
                                     </span>
                                   </td>
 
-                                  {canEdit && (
+                                  {!isViewOnly && (
                                     <td className="px-3 py-3 text-center">
                                       <div className="flex justify-center space-x-2">
                                         <button
@@ -1137,6 +1349,7 @@ const CotizacionEditPage = () => {
                           </table>
                         </div>
 
+                        {/* Total final */}
                         <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-6 py-4 border-t border-gray-300">
                           <div className="flex justify-between items-center">
                             <div>
@@ -1145,7 +1358,7 @@ const CotizacionEditPage = () => {
                             </div>
                             <div className="text-right">
                               <div className="text-3xl font-bold">
-                                S/. {parseFloat(cotizacionData.totalCotizacion || 0).toFixed(2)}
+                                S/. {parseFloat(cotizacion.totalCotizacion || 0).toFixed(2)}
                               </div>
                             </div>
                           </div>
@@ -1160,267 +1373,309 @@ const CotizacionEditPage = () => {
         </div>
       </div>
 
-      {/* Modal de Cantidad y Precio */}
-      <Transition.Root show={showQuantityModal} as={Fragment}>
-        <Dialog as="div" className="relative z-50" onClose={setShowQuantityModal}>
-          <Transition.Child
-            as={Fragment}
-            enter="ease-out duration-300"
-            enterFrom="opacity-0"
-            enterTo="opacity-100"
-            leave="ease-in duration-200"
-            leaveFrom="opacity-100"
-            leaveTo="opacity-0"
-          >
-            <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" />
-          </Transition.Child>
+      {/* Modal de Cantidad y Precio - Solo en modo edición */}
+      {!isViewOnly && (
+        <Transition.Root show={showQuantityModal} as={Fragment}>
+          <Dialog as="div" className="relative z-50" onClose={setShowQuantityModal}>
+            <Transition.Child
+              as={Fragment}
+              enter="ease-out duration-300"
+              enterFrom="opacity-0"
+              enterTo="opacity-100"
+              leave="ease-in duration-200"
+              leaveFrom="opacity-100"
+              leaveTo="opacity-0"
+            >
+              <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" />
+            </Transition.Child>
 
-          <div className="fixed inset-0 z-50 overflow-y-auto">
-            <div className="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
-              <Transition.Child
-                as={Fragment}
-                enter="ease-out duration-300"
-                enterFrom="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                enterTo="opacity-100 translate-y-0 sm:scale-100"
-                leave="ease-in duration-200"
-                leaveFrom="opacity-100 translate-y-0 sm:scale-100"
-                leaveTo="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-              >
-                <Dialog.Panel className="relative transform overflow-hidden rounded-lg bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-2xl sm:p-6">
-                  <div className="absolute right-0 top-0 hidden pr-4 pt-4 sm:block">
-                    <button
-                      type="button"
-                      className="rounded-md bg-white text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-                      onClick={() => setShowEditItemModal(false)}
-                    >
-                      <span className="sr-only">Cerrar</span>
-                      <XMarkIcon className="h-6 w-6" aria-hidden="true" />
-                    </button>
-                  </div>
-
-                  <div className="sm:flex sm:items-start">
-                    <div className="mx-auto flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-yellow-100 sm:mx-0 sm:h-10 sm:w-10">
-                      <PencilIcon className="h-6 w-6 text-yellow-600" aria-hidden="true" />
+            <div className="fixed inset-0 z-50 overflow-y-auto">
+              <div className="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
+                <Transition.Child
+                  as={Fragment}
+                  enter="ease-out duration-300"
+                  enterFrom="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                  enterTo="opacity-100 translate-y-0 sm:scale-100"
+                  leave="ease-in duration-200"
+                  leaveFrom="opacity-100 translate-y-0 sm:scale-100"
+                  leaveTo="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                >
+                  <Dialog.Panel className="relative transform overflow-hidden rounded-lg bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-2xl sm:p-6">
+                    <div className="absolute right-0 top-0 hidden pr-4 pt-4 sm:block">
+                      <button
+                        type="button"
+                        className="rounded-md bg-white text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                        onClick={() => setShowQuantityModal(false)}
+                      >
+                        <span className="sr-only">Cerrar</span>
+                        <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+                      </button>
                     </div>
-                    <div className="mt-3 text-center sm:ml-4 sm:mt-0 sm:text-left w-full">
-                      <Dialog.Title as="h3" className="text-xl font-semibold leading-6 text-gray-900 mb-4">
-                        Editar Producto
-                      </Dialog.Title>
-                      
-                      {editingItem && (
-                        <div className="mt-4">
-                          <div className="bg-gray-50 p-6 rounded-lg mb-6">
-                            <h4 className="font-semibold text-lg text-gray-900 mb-2">
-                              {editingItem.nombreProducto}
-                            </h4>
-                            <div className="grid grid-cols-2 gap-4 text-sm">
-                              <div>
-                                <span className="font-medium text-gray-700">Código: </span>
-                                <span className="text-gray-600">{editingItem.codigoTienda}</span>
+
+                    <div className="sm:flex sm:items-start">
+                      <div className="mx-auto flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-blue-100 sm:mx-0 sm:h-10 sm:w-10">
+                        <ShoppingCartIcon className="h-6 w-6 text-blue-600" aria-hidden="true" />
+                      </div>
+                      <div className="mt-3 text-center sm:ml-4 sm:mt-0 sm:text-left w-full">
+                        <Dialog.Title as="h3" className="text-xl font-semibold leading-6 text-gray-900 mb-4">
+                          Agregar Producto a Cotización
+                        </Dialog.Title>
+                        
+                        {selectedProduct && (
+                          <div className="mt-4">
+                            <div className="bg-gray-50 p-6 rounded-lg mb-6">
+                              <h4 className="font-semibold text-lg text-gray-900 mb-2">
+                                {selectedProduct.nombre}
+                              </h4>
+                              <div className="grid grid-cols-2 gap-4 text-sm">
+                                <div>
+                                  <span className="font-medium text-gray-700">Código: </span>
+                                  <span className="text-gray-600">{selectedProduct.codigoTienda}</span>
+                                </div>
+                                <div>
+                                  <span className="font-medium text-gray-700">Marca: </span>
+                                  <span className="text-gray-600">{selectedProduct.marca || 'Sin marca'}</span>
+                                </div>
+                                <div>
+                                  <span className="font-medium text-gray-700">Stock disponible: </span>
+                                  <span className="text-gray-600">{selectedProduct.stockActual || 0}</span>
+                                </div>
+                                <div>
+                                  <span className="font-medium text-gray-700">Color: </span>
+                                  <span className="text-gray-600">{selectedProduct.color || 'N/A'}</span>
+                                </div>
                               </div>
+                              
+                              <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                                <div className="flex justify-between items-center">
+                                  <span className="text-sm font-medium text-yellow-800">
+                                    Precio Venta Mínimo:
+                                  </span>
+                                  <span className="text-lg font-bold text-yellow-900">
+                                    S/. {parseFloat(selectedProduct.precioVentaMinimo || 0).toFixed(2)}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-6">
                               <div>
-                                <span className="font-medium text-gray-700">Marca: </span>
-                                <span className="text-gray-600">{editingItem.marca}</span>
+                                <label className="block text-sm font-medium text-gray-700 mb-3">
+                                  Cantidad
+                                </label>
+                                <input
+                                  type="number"
+                                  value={quantity}
+                                  onChange={(e) => setQuantity(parseInt(e.target.value) || 1)}
+                                  min="1"
+                                  max={selectedProduct.stockActual || 999}
+                                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-3">
+                                  Precio de Venta (S/.)
+                                </label>
+                                <input
+                                  type="number"
+                                  value={precioVenta}
+                                  onChange={(e) => setPrecioVenta(parseFloat(e.target.value) || 0)}
+                                  min="0"
+                                  step="0.01"
+                                  className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:border-transparent text-lg ${
+                                    precioVenta < parseFloat(selectedProduct.precioVentaMinimo || 0)
+                                      ? 'border-red-300 focus:ring-red-500 bg-red-50'
+                                      : 'border-gray-300 focus:ring-blue-500'
+                                  }`}
+                                />
+                                {precioVenta < parseFloat(selectedProduct.precioVentaMinimo || 0) && (
+                                  <p className="text-red-600 text-sm mt-1 font-medium">
+                                    ⚠️ Precio por debajo del mínimo permitido
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="bg-gradient-to-r from-blue-50 to-blue-100 p-6 rounded-lg border border-blue-200 mt-6">
+                              <div className="flex justify-between items-center">
+                                <span className="text-lg font-medium text-gray-700">Subtotal:</span>
+                                <span className="font-bold text-blue-800 text-2xl">S/. {(quantity * precioVenta).toFixed(2)}</span>
                               </div>
                             </div>
                           </div>
-
-                          <div className="grid grid-cols-2 gap-6">
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-3">
-                                Cantidad
-                              </label>
-                              <input
-                                type="number"
-                                value={editQuantity}
-                                onChange={(e) => setEditQuantity(parseInt(e.target.value) || 1)}
-                                min="1"
-                                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
-                              />
-                            </div>
-
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-3">
-                                Precio de Venta (S/.)
-                              </label>
-                              <input
-                                type="number"
-                                value={editPrecio}
-                                onChange={(e) => setEditPrecio(parseFloat(e.target.value) || 0)}
-                                min="0"
-                                step="0.01"
-                                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
-                              />
-                            </div>
-                          </div>
-
-                          <div className="bg-gradient-to-r from-yellow-50 to-yellow-100 p-6 rounded-lg border border-yellow-200 mt-6">
-                            <div className="flex justify-between items-center">
-                              <span className="text-lg font-medium text-gray-700">Nuevo Subtotal:</span>
-                              <span className="font-bold text-yellow-800 text-2xl">S/. {(editQuantity * editPrecio).toFixed(2)}</span>
-                            </div>
-                          </div>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="mt-6 sm:mt-6 sm:flex sm:flex-row-reverse gap-3">
-                    <button
-                      type="button"
-                      className="inline-flex w-full justify-center rounded-md bg-yellow-600 px-6 py-3 text-base font-semibold text-white shadow-sm hover:bg-yellow-500 sm:w-auto disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-                      onClick={handleUpdateItem}
-                      disabled={editQuantity <= 0 || editPrecio <= 0}
-                    >
-                      Actualizar
-                    </button>
-                    <button
-                      type="button"
-                      className="mt-3 inline-flex w-full justify-center rounded-md bg-white px-6 py-3 text-base font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 sm:mt-0 sm:w-auto transition-colors"
-                      onClick={() => setShowEditItemModal(false)}
-                    >
-                      Cancelar
-                    </button>
-                  </div>
-                </Dialog.Panel>
-              </Transition.Child>
+                    <div className="mt-6 sm:mt-6 sm:flex sm:flex-row-reverse gap-3">
+                      <button
+                        type="button"
+                        className="inline-flex w-full justify-center rounded-md bg-blue-600 px-6 py-3 text-base font-semibold text-white shadow-sm hover:bg-blue-500 sm:w-auto disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                        onClick={handleAddProductToCotizacion}
+                        disabled={!cotizacion || quantity <= 0 || precioVenta <= 0}
+                      >
+                        Agregar a Cotización
+                      </button>
+                      <button
+                        type="button"
+                        className="mt-3 inline-flex w-full justify-center rounded-md bg-white px-6 py-3 text-base font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 sm:mt-0 sm:w-auto transition-colors"
+                        onClick={() => setShowQuantityModal(false)}
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </Dialog.Panel>
+                </Transition.Child>
+              </div>
             </div>
-          </div>
-        </Dialog>
-      </Transition.Root>
+          </Dialog>
+        </Transition.Root>
+      )}
 
-      
-      {/* Modal de Edición de Item - VERSIÓN MEJORADA */}
-      <Transition.Root show={showEditItemModal} as={Fragment}>
-        <Dialog as="div" className="relative z-50" onClose={setShowEditItemModal}>
-          <Transition.Child
-            as={Fragment}
-            enter="ease-out duration-300"
-            enterFrom="opacity-0"
-            enterTo="opacity-100"
-            leave="ease-in duration-200"
-            leaveFrom="opacity-100"
-            leaveTo="opacity-0"
-          >
-            <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" />
-          </Transition.Child>
-      
-          <div className="fixed inset-0 z-50 overflow-y-auto">
-            <div className="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
-              <Transition.Child
-                as={Fragment}
-                enter="ease-out duration-300"
-                enterFrom="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-                enterTo="opacity-100 translate-y-0 sm:scale-100"
-                leave="ease-in duration-200"
-                leaveFrom="opacity-100 translate-y-0 sm:scale-100"
-                leaveTo="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-              >
-                <Dialog.Panel className="relative transform overflow-hidden rounded-lg bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-2xl sm:p-6">
-                  <div className="absolute right-0 top-0 hidden pr-4 pt-4 sm:block">
-                    <button
-                      type="button"
-                      className="rounded-md bg-white text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-                      onClick={() => setShowEditItemModal(false)}
-                    >
-                      <span className="sr-only">Cerrar</span>
-                      <XMarkIcon className="h-6 w-6" aria-hidden="true" />
-                    </button>
-                  </div>
-      
-                  <div className="sm:flex sm:items-start">
-                    <div className="mx-auto flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-yellow-100 sm:mx-0 sm:h-10 sm:w-10">
-                      <PencilIcon className="h-6 w-6 text-yellow-600" aria-hidden="true" />
+      {/* Modal de Edición de Item - Solo en modo edición */}
+      {!isViewOnly && (
+        <Transition.Root show={showEditItemModal} as={Fragment}>
+          <Dialog as="div" className="relative z-50" onClose={setShowEditItemModal}>
+            <Transition.Child
+              as={Fragment}
+              enter="ease-out duration-300"
+              enterFrom="opacity-0"
+              enterTo="opacity-100"
+              leave="ease-in duration-200"
+              leaveFrom="opacity-100"
+              leaveTo="opacity-0"
+            >
+              <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" />
+            </Transition.Child>
+
+            <div className="fixed inset-0 z-50 overflow-y-auto">
+              <div className="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
+                <Transition.Child
+                  as={Fragment}
+                  enter="ease-out duration-300"
+                  enterFrom="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                  enterTo="opacity-100 translate-y-0 sm:scale-100"
+                  leave="ease-in duration-200"
+                  leaveFrom="opacity-100 translate-y-0 sm:scale-100"
+                  leaveTo="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+                >
+                  <Dialog.Panel className="relative transform overflow-hidden rounded-lg bg-white px-4 pb-4 pt-5 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-2xl sm:p-6">
+                    <div className="absolute right-0 top-0 hidden pr-4 pt-4 sm:block">
+                      <button
+                        type="button"
+                        className="rounded-md bg-white text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                        onClick={() => setShowEditItemModal(false)}
+                      >
+                        <span className="sr-only">Cerrar</span>
+                        <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+                      </button>
                     </div>
-                    <div className="mt-3 text-center sm:ml-4 sm:mt-0 sm:text-left w-full">
-                      <Dialog.Title as="h3" className="text-xl font-semibold leading-6 text-gray-900 mb-4">
-                        Editar Producto
-                      </Dialog.Title>
-                      
-                      {editingItem && (
-                        <div className="mt-4">
-                          <div className="bg-gray-50 p-6 rounded-lg mb-6">
-                            <h4 className="font-semibold text-lg text-gray-900 mb-2">
-                              {editingItem.nombreProducto}
-                            </h4>
-                            <div className="grid grid-cols-2 gap-4 text-sm">
-                              <div>
-                                <span className="font-medium text-gray-700">Código: </span>
-                                <span className="text-gray-600">{editingItem.codigoTienda}</span>
+
+                    <div className="sm:flex sm:items-start">
+                      <div className="mx-auto flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-yellow-100 sm:mx-0 sm:h-10 sm:w-10">
+                        <PencilIcon className="h-6 w-6 text-yellow-600" aria-hidden="true" />
+                      </div>
+                      <div className="mt-3 text-center sm:ml-4 sm:mt-0 sm:text-left w-full">
+                        <Dialog.Title as="h3" className="text-xl font-semibold leading-6 text-gray-900 mb-4">
+                          Editar Producto
+                        </Dialog.Title>
+                        
+                        {editingItem && (
+                          <div className="mt-4">
+                            <div className="bg-gray-50 p-6 rounded-lg mb-6">
+                              <h4 className="font-semibold text-lg text-gray-900 mb-2">
+                                {editingItem.nombreProducto}
+                              </h4>
+                              <div className="grid grid-cols-2 gap-4 text-sm">
+                                <div>
+                                  <span className="font-medium text-gray-700">Código: </span>
+                                  <span className="text-gray-600">{editingItem.codigoTienda}</span>
+                                </div>
+                                <div>
+                                  <span className="font-medium text-gray-700">Marca: </span>
+                                  <span className="text-gray-600">{editingItem.marca}</span>
+                                </div>
                               </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-6">
                               <div>
-                                <span className="font-medium text-gray-700">Marca: </span>
-                                <span className="text-gray-600">{editingItem.marca}</span>
+                                <label className="block text-sm font-medium text-gray-700 mb-3">
+                                  Cantidad
+                                </label>
+                                <input
+                                  type="number"
+                                  value={editQuantity}
+                                  onChange={(e) => setEditQuantity(parseInt(e.target.value) || 1)}
+                                  min="1"
+                                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-3">
+                                  Precio de Venta (S/.)
+                                </label>
+                                <input
+                                  type="number"
+                                  value={editPrecio}
+                                  onChange={(e) => setEditPrecio(parseFloat(e.target.value) || 0)}
+                                  min="0"
+                                  step="0.01"
+                                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="bg-gradient-to-r from-yellow-50 to-yellow-100 p-6 rounded-lg border border-yellow-200 mt-6">
+                              <div className="flex justify-between items-center">
+                                <span className="text-lg font-medium text-gray-700">Nuevo Subtotal:</span>
+                                <span className="font-bold text-yellow-800 text-2xl">S/. {(editQuantity * editPrecio).toFixed(2)}</span>
                               </div>
                             </div>
                           </div>
-      
-                          <div className="grid grid-cols-2 gap-6">
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-3">
-                                Cantidad
-                              </label>
-                              <input
-                                type="number"
-                                value={editQuantity}
-                                onChange={(e) => setEditQuantity(parseInt(e.target.value) || 1)}
-                                min="1"
-                                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
-                              />
-                            </div>
-      
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-3">
-                                Precio de Venta (S/.)
-                              </label>
-                              <input
-                                type="number"
-                                value={editPrecio}
-                                onChange={(e) => setEditPrecio(parseFloat(e.target.value) || 0)}
-                                min="0"
-                                step="0.01"
-                                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
-                              />
-                            </div>
-                          </div>
-      
-                          <div className="bg-gradient-to-r from-yellow-50 to-yellow-100 p-6 rounded-lg border border-yellow-200 mt-6">
-                            <div className="flex justify-between items-center">
-                              <span className="text-lg font-medium text-gray-700">Nuevo Subtotal:</span>
-                              <span className="font-bold text-yellow-800 text-2xl">S/. {(editQuantity * editPrecio).toFixed(2)}</span>
-                            </div>
-                          </div>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
-                  </div>
-      
-                  <div className="mt-6 sm:mt-6 sm:flex sm:flex-row-reverse gap-3">
-                    <button
-                      type="button"
-                      className="inline-flex w-full justify-center rounded-md bg-yellow-600 px-6 py-3 text-base font-semibold text-white shadow-sm hover:bg-yellow-500 sm:w-auto disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-                      onClick={handleUpdateItem}
-                      disabled={editQuantity <= 0 || editPrecio <= 0}
-                    >
-                      Actualizar
-                    </button>
-                    <button
-                      type="button"
-                      className="mt-3 inline-flex w-full justify-center rounded-md bg-white px-6 py-3 text-base font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 sm:mt-0 sm:w-auto transition-colors"
-                      onClick={() => setShowEditItemModal(false)}
-                    >
-                      Cancelar
-                    </button>
-                  </div>
-                </Dialog.Panel>
-              </Transition.Child>
+
+                    <div className="mt-6 sm:mt-6 sm:flex sm:flex-row-reverse gap-3">
+                      <button
+                        type="button"
+                        className="inline-flex w-full justify-center rounded-md bg-yellow-600 px-6 py-3 text-base font-semibold text-white shadow-sm hover:bg-yellow-500 sm:w-auto disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                        onClick={handleUpdateItem}
+                        disabled={editQuantity <= 0 || editPrecio <= 0}
+                      >
+                        Actualizar
+                      </button>
+                      <button
+                        type="button"
+                        className="mt-3 inline-flex w-full justify-center rounded-md bg-white px-6 py-3 text-base font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 sm:mt-0 sm:w-auto transition-colors"
+                        onClick={() => setShowEditItemModal(false)}
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </Dialog.Panel>
+                </Transition.Child>
+              </div>
             </div>
-          </div>
-        </Dialog>
-      </Transition.Root>
+          </Dialog>
+        </Transition.Root>
+      )}
+
+      {/* Mixed Payment Modal - Solo en modo edición */}
+      {!isViewOnly && (
+        <MixedPaymentModal
+          isOpen={showPaymentModal}
+          onClose={() => setShowPaymentModal(false)}
+          totalAmount={parseFloat(cotizacion?.totalCotizacion || 0)}
+          onPaymentConfirm={handlePaymentConfirm}
+          initialPaymentMethod={paymentData.paymentMethods[0]?.method || 'efectivo'}
+        />
+      )}
     </Layout>
   );
 };
 
-export default CotizacionEditPage;
-
+export default EditarVerCotizacionPage;
